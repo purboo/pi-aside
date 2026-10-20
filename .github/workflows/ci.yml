@@ -1,0 +1,27 @@
+name: ci
+# Typecheck and the whole offline suite: a local capture server for the three provider APIs, real Pi over RPC, and
+# the real Pi TUI driven through tmux. Pi is installed with bun's global layout, which `bun run link-pi` expects.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PI_VERSION: "1.3.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "24" }
+      - uses: oven-sh/setup-bun@v2
+      - run: sudo apt-get update -q && sudo apt-get install -y -q tmux
+      - run: bun add -g "@earendil-works/pi-coding-agent@${PI_VERSION}" && echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+      - run: bun install --frozen-lockfile
+      - run: bun run link-pi
+      - run: bunx tsc --noEmit -p .
+      - run: bun test
