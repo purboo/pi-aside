@@ -1,7 +1,9 @@
 # pi-aside: design
 
-Status: design, revision 2 (2026-10-20). Nothing is implemented yet. Revision 2 answers the GPT design review
-(`/tmp/aside-design-review.md`, 12 findings). The resolution of each finding is in §10.
+Status: design, revision 3 (2026-10-20). Nothing is implemented yet.
+- Revision 2 answers the first GPT design review (`/tmp/aside-design-review.md`, 12 findings); see §10.
+- Revision 3 answers the re-review (7 findings, no P0); see §11. Its rule: **attribution selects a candidate, checks
+  prove it**. No guarantee rests on event timing alone.
 
 pi-aside answers a side question about the running Pi session at the cache-read price. The aside request is the
 request the main session would send next if the question were the user's next message. It is computed without
@@ -67,18 +69,20 @@ surveyed package carries the handler changes over.
     themselves move every turn and are not part of the key);
   - the top-level fields that key the message cache: `model`, `thinking`, and `max_tokens` under budget-based
     thinking (Pi `cache-warmer.js`, `isReplayable`);
-  - the routing identity that picks the account or shard: `metadata.user_id` through relays, `prompt_cache_key` on
-    OpenAI.
+  - the routing identity that picks the account or shard: the credential, `metadata.user_id` through relays,
+    `prompt_cache_key` on OpenAI.
 - **A2. Truth.** The only exact record of what the main session sends is the payload Pi hands to the provider
   after every handler ran. pi-aside observes it at its own position among the handlers (§4.1), so every guarantee
   is stated relative to that observation.
 - **A3. No hooks, no transcript.** An aside runs no extension hook and adds nothing to the model context. Its one
   session write is a Pi usage entry (§4.6), the same kind Pi's own cache warmer writes. Effects through the shared
-  provider cache, such as a refreshed TTL, are intended, and they are reported.
+  provider cache, such as a refreshed TTL, are intended, and they are reported. Effects through other extensions'
+  reading of usage entries are reported, not prevented (§5).
 - **A4. Zero parameters.** No settings. Behaviour follows from A1–A3 and from what the provider reports.
 - **A5. Checked, then measured.** An aside is sent at tier T0 only after a local check proves its content and
-  routing fields extend the observed request. Each answer shows the provider's cache read against the cacheable
-  prefix the main response reported. Usage numbers are observations, never proof.
+  routing fields extend the observed request. Event order only *selects* the candidate; the checks decide. Each
+  answer shows the provider's cache read against the cacheable prefix the main response reported. Usage numbers
+  are observations, never proof.
 
 ## 3. What the user sees
 
@@ -101,7 +105,7 @@ The aside opens as an overlay panel, and the main session keeps running undernea
 - `exact · read 151,040 of 151,040 cacheable · $0.04`;
 - `exact · read 0, wrote 151,040 · $0.77` — the provider wrote instead of reading. The usual cause is an expired
   main cache, and this write re-warms it for the main session's next turn;
-- `rebuilt · not expected to hit` (§4.8).
+- `rebuilt · not expected to hit` plus the reason (§4.8).
 
 **Status line.** It shows `aside: replying…` or `aside: reply ready` while the panel is hidden.
 
@@ -112,21 +116,62 @@ and JSON modes refuse with a message.
 
 ### 4.1 Observation
 
-pi-aside keeps one **observation** per session. It is assembled over one logical agent request:
+pi-aside keeps one **observation** per session. It is assembled over one logical agent request L.
+
+**How Pi emits provider events.** Each `streamSimple` call is one **stream call**:
+- `before_provider_headers` (H) fires once, inside request preparation (`transformHeaders`, `sdk.js:204`), after
+  auth is resolved;
+- `before_provider_request` (R) fires once per wire attempt. pi-ai's own retry for a rejected strict-tools request
+  adds an R (`anthropic-messages.js:436-454`). SDK-level retries resend the same payload without a new R;
+- `after_provider_response` (S) fires at most once, on success only, before any provider event is read
+  (`anthropic-messages.js:478`). A failed attempt emits nothing.
+
+Pi's cache warmer (1.3.0) also produces stream calls. It copies the agent's request options, including the
+callbacks, so its H, R and S reach every handler (`cache-warmer.js:238`). It fires `cache_warming_decision` before
+each replay, and its payload carries `maxTokens: 1`. It never produces agent message events.
 
 | Event | Recorded |
 |---|---|
-| `context_with_system` | Starts a logical request L. Records the transcript `T` (agent messages, system messages included) as it stands after the handlers before pi-aside, and the session leaf |
-| `before_provider_request` within L | One **attempt**: a reference to the payload. A retry inside pi-ai, such as Anthropic's strict-tools fallback (`anthropic-messages.js:436-454`), adds another attempt |
-| `before_provider_headers` within L | The attempt's header map, by reference, because handlers mutate it in place |
-| `after_provider_response`, status 2xx | Promotes the latest attempt. L closes, and its observation replaces the previous one |
-| `provider_stream_event` (Pi ≥0.99.1) | The physical provider, API and model id of the promoted attempt |
-| main response `message_end` | Its usage. `cacheRead + cacheWrite` is the **cacheable prefix**: the tokens before P's last breakpoint |
+| `context_with_system` | Opens L. Records the transcript `T` (agent messages, system and tool-state messages included) as it stands after the handlers before pi-aside, the session leaf, and the **recipe** R (below) |
+| first H in L | Starts L's main stream call. Keeps the header map by reference (handlers mutate it in place). Resolves the **credential identity** K (§4.2) |
+| R in L's main call | One attempt, kept by reference |
+| S of L's main call | **Promotes** the latest attempt: it is cloned and becomes P. L closes |
+| first main-assistant `message_update`, or its `message_end` | Marks the observation **ready** (below). `message_end` also gives the usage: `cacheRead + cacheWrite` is the **cacheable prefix** |
+| `provider_stream_event` (Pi ≥0.99.1) | The physical provider, API and model id of the promoted call |
 
-Rules:
-- **Gate.** `before_provider_request` outside an open L is ignored. That covers Pi's warmer replays (sent with
-  `maxTokens: 1`) and anything else replayed without the agent's `context` stage. Compaction and extension
-  summaries go through `modelRegistry.streamSimple` and run no hook.
+**Attribution rules.**
+- **Ambiguity.** L is ambiguous, and promotes nothing, if any of the following arrives before its main call's S:
+  - a second H;
+  - a `cache_warming_decision`;
+  - an R or S not preceded by L's first H.
+- **Closing.** L closes on S, on the main assistant's `message_end` (an error or abort without S), on `agent_end`,
+  or on a session event. After that, H, R and S are ignored until the next `context_with_system`. Pi's warmer and
+  anything else replayed without the `context` stage can therefore only reach an observation by being mistaken
+  inside an open L.
+- **Mistaken payloads fail.** That mistake cannot pass C1 (§4.2): a warmer payload differs from `conv_R(T)` in
+  `max_tokens`, which the recipe controls.
+
+**Readiness is separate from promotion.** An Anthropic cache entry is usable once the response has begun, but S
+fires before any provider event is read; a 2xx with a withheld body is not a started response. The observation is
+therefore ready on the first `message_update` of the main assistant message, or on its `message_end`. Agent
+message events come only from the agent loop, never from the warmer or other `streamSimple` callers, so they need no
+attribution.
+
+**APIs without S.** Google adapters never call `onResponse` (`google-generative-ai.js:49`), and neither does Codex's
+WebSocket path (`openai-codex-responses.js:198`). These APIs are not T0 APIs (§4.2), so an aside on them goes to
+T1 at once instead of waiting for an event that never comes.
+
+**The recipe R.** The conversion inputs are frozen at `context_with_system`:
+- the physical model and API;
+- the effective reasoning level and the thinking budgets;
+- the token limit and cache retention;
+- the session id and transport;
+- image blocking, and the agent's `convertToLlm`.
+
+Both conversions in §4.2 use the same R, so a later `/model` or thinking change does not touch an aside of this
+observation. An R that does not reproduce P fails C1, and the aside falls to T1.
+
+Other rules:
 - **Cloning.** Attempts are kept by reference and cloned only when promoted. Handlers after pi-aside that mutate in
   place are therefore seen.
 - **Dropping.** The observation is dropped on `session_compact`, `session_tree`, `session_start` and
@@ -138,36 +183,60 @@ Rules:
     confirms this.
   - The upstream ask is an observe-only event carrying the final payload and headers (§8).
 
-The **promoted payload** is called P below.
-
 ### 4.2 The aside request: next request, handler-free
 
 The aside does not splice provider payloads by hand. It asks pi-ai to convert the whole fork and compares the
 result against P.
 
 ```text
-T     = observed transcript (post-context, system and tool-state messages included)
-G     = what the branch gained since the observation's leaf: the reply, tool results, steers;
-        plus "still running" results for tool calls that have none yet
-Q     = user message: <aside notice> + question
-conv  = the agent's convertToLlm (with the session's image blocking), then pi-ai's provider conversion,
-        same physical model, same reasoning level, same sessionId, cache retention as the main session
+T      = observed transcript (post-context, system and tool-state messages included)
+G      = what the branch gained since the observation's leaf: the reply, tool results, steers;
+         plus "still running" results for tool calls that have none yet
+Q      = user message: <aside notice> + question
+conv_R = the agent's convertToLlm, then pi-ai's provider conversion, under the frozen recipe R
 
-B0 = conv(T)            dry: an onPayload hook records the payload and aborts before any HTTP call
-B1 = conv(T ++ G ++ Q)  the real request; its onPayload returns F
-ΔH = diff(B0, P)        what handlers after Pi's conversion changed
-ΔG = diff(B0, B1)       what the fork adds
+B0 = conv_R(T)            dry: an onPayload hook records the payload and aborts; no inference request is sent
+B1 = conv_R(T ++ G ++ Q)  the real request; its onPayload returns F
+ΔH = diff(B0, P)          what handlers after Pi's conversion changed
 F  = B1 with ΔH applied
 ```
 
-**Tier T0 is used only if all three checks pass.** Otherwise the aside uses T1 (§4.8). Comparisons strip
-`cache_control` markers.
+**The context passed to pi-ai.** T's system and tool-state messages go in as transcript messages, which the agent
+loop passes through `normalizeContext`. The legacy `systemPrompt` and `tools` fields are never set as well: doing so
+would add a second system message.
+
+**The dry run.** The abort happens in `onPayload`, after auth resolution and before the inference request. Resolving
+auth may itself refresh an OAuth token, for example Copilot's (`github-copilot.js:247`). The main session's next
+request would do the same.
+
+**Normalisation.** `strip()` removes `cache_control` markers. It also writes a string-valued message content as one
+text block, because pi-ai turns the last user message's string into a block when it attaches a marker
+(`anthropic-messages.js:1236-1241`), and that message is no longer last in B1.
+
+**Terminal configuration items.** pi-ai appends items after the conversation that describe the request, not the
+history:
+
+| API | Trailing item E | Source |
+|---|---|---|
+| `anthropic-messages` (native effort) | `{role: "system", content: [], output_config: {effort}}` | `insertThinkingLevelMessages`, `anthropic-messages.js:1250` |
+| `openai-responses` | `configuration_update` | `openai-responses-shared.js:278` |
+| `openai-completions` | none | — |
+
+Each list is split as `list = core ++ E`, where E is the longest run of trailing items of the API's E shape. Inside
+B1, the effort of an earlier assistant turn stays in the core as its historical item. Only the trailing items are
+split off.
+
+**Tier T0 is used only if all three checks pass.** Otherwise the aside uses T1 (§4.8).
 
 | Check | Meaning | Typical failure |
 |---|---|---|
-| C1 `ΔH` touches top-level fields only | Handlers changed fields such as `metadata` or `max_tokens`, never the content list. The content list of B0 equals P's | A handler rewrote messages in `before_provider_request`; the reproduction is off (convertToLlm settings, version drift) |
-| C2 `ΔG` touches the content list only, by appending | `B1.list` extends `B0.list`. The last element of `B0.list` may be extended by appended blocks of the same role. `system`, `tools`, `betas` and every other top-level field are equal | The gain carries a system or tool-set change; a provider-specific rule rewrote the boundary |
-| C3 `F`'s top-level fields equal P's, and `strip(F.list)` extends `strip(P.list)` | Follows from C1 and C2, and is checked anyway on the bytes sent | — |
+| C1 `ΔH` touches only fields the recipe does not control, and `strip(B0.list) = strip(P.list)` | Handlers may change routing and annotation fields such as `metadata` or `prompt_cache_key`. They may not change the recipe-controlled fields: the content list, `system`/`instructions`, `tools`, `tool_choice`, `model`, the token limits, `thinking`/`reasoning`/`output_config`, and `stream` | A handler rewrote messages; R does not reproduce P (settings, version drift); a mistaken warmer payload (`max_tokens: 1`) |
+| C2 the fork appends to the core | `E(B1) = E(B0)`, and `strip(core(B1))` extends `strip(core(B0))`. The last core element of B0 may be extended by appended blocks of the same role. P's last cache marker lies inside `core(B0)`. Every other top-level field is equal | The gain carries a system or tool-set change; a provider rule rewrote the boundary |
+| C3 on the bytes sent: `F`'s top-level fields equal P's, and `strip(core(F))` extends `strip(core(P))` | Follows from C1 and C2, and is checked anyway | — |
+
+The concurrent case is common. The aside is asked while the main reply streams, so G has no completed reply. On a
+native-effort model this gives `B0 = …, user, E` and `B1 = …, user ⊕ question, E`. With E split off, the core
+comparison passes, and the effort is unchanged.
 
 Why this is enough:
 - Every block of the fork is produced by pi-ai's own converter over the full transcript. The provider rules
@@ -180,18 +249,34 @@ Why this is enough:
 - The request is sent through `ctx.modelRegistry.streamSimple`, which runs no extension hook. Pi wires handlers
   only into the agent's `streamFn` (`sdk.js:225-230`).
 
-**Routing and headers:**
-- The physical model comes from the observation, never from `ctx.model`, so a virtual model's router is not
-  invoked.
-- The headers are the observed map with auth keys replaced by fresh `getApiKeyAndHeaders` values. Provider-derived
-  headers are recomputed by pi-ai from the full fork context; for example, Copilot's vision header sees the images
-  in T.
-- The endpoint is resolved by the same auth path. `ResolvedRequestAuth.baseUrl` is recorded at observation and at
-  aside time, and a difference forces T1.
+**Routing.**
+- *Model.* The physical model comes from the observation, never from `ctx.model`, so a virtual model's router is
+  not invoked.
+- *Credential identity K.* K is resolved with `ctx.modelRegistry.getApiKeyAndHeaders(model)` in the H handler,
+  that is, right after Pi resolved the main call's auth. K holds:
+  - the provider id and the resolved `baseUrl`;
+  - a non-secret account id when the credential exposes one, otherwise a SHA-256 of the API key and of the
+    auth-bearing headers.
 
-**Supported APIs for T0:** `anthropic-messages`, `openai-responses` over HTTP, and `openai-completions`. The only
-API-specific knowledge is the name of the content list (`messages` or `input`) and the marker key. A payload with
-`previous_response_id`, a WebSocket transport, or a provider that keeps conversation state uses T1.
+  K lives in memory only.
+- *Checking K.* At aside time, auth is resolved once and K is compared. Any difference gives T1 labelled
+  `credentials changed`; an unknown change counts as a difference. A token refresh without an account id is
+  therefore a conservative T1.
+- *Pinning the snapshot.* The aside request uses that same resolution: the `apiKey`, the headers, and the model
+  with the snapshot's `baseUrl`. Its `transformHeaders` callback checks that the final auth-bearing headers equal
+  the snapshot's, and aborts before sending if they do not. Resolution therefore cannot change between the check
+  and the send.
+- *Headers.* The observed map, with auth entries from the snapshot. Provider-derived headers are recomputed by pi-ai
+  from the full fork context; for example, Copilot's vision header sees the images in T.
+
+**Supported APIs for T0:** `anthropic-messages`, `openai-responses` and `openai-completions`, each only over a
+stateless HTTP/SSE transport.
+- A payload with `previous_response_id`, a WebSocket transport, or a provider that keeps conversation or connection
+  state uses T1.
+- `openai-codex-responses` is always T1.
+- S0 checks, per T0 adapter, that the session id keys no client-side state: no socket and no continuation cache.
+- The only API-specific knowledge is in one table: the name of the content list (`messages` or `input`), the
+  marker key, and the shape of E.
 
 **The notice** rides in Q, never in `system`. It says:
 - this is a temporary side conversation, and the main agent keeps working;
@@ -200,14 +285,16 @@ API-specific knowledge is the name of the content list (`messages` or `input`) a
 
 ### 4.3 Timing
 
-An Anthropic cache entry is usable only after its response begins. The aside therefore checks the state of L and
-the observation:
-
-| State | Action |
+| State of the latest L | Action |
 |---|---|
-| L open, no 2xx response yet | Wait for promotion. The wait ends on the 2xx response, or on the attempt's failure, abort, `agent_end`, session switch or shutdown. On failure, the previous observation is used if the branch still extends it; otherwise T1 |
-| Observation promoted, response streaming or done | Send now. G holds what has landed, with "still running" results where needed |
-| No observation in this process | T1 |
+| Open, not promoted | Wait for promotion, then for readiness |
+| Promoted, not ready | Wait for readiness |
+| Ready | Send now. G holds what has landed, with "still running" results where needed |
+| Ambiguous, failed or aborted | Use the previous observation if it is ready and the branch still extends it; otherwise T1 |
+| API without S, or no observation in this process | T1 at once |
+
+Any wait also ends on the main assistant's `message_end` with an error or abort, on `agent_end`, on a session switch
+and on shutdown. The decision is then made from the table again.
 
 The panel never calls the main cache "cold" because of elapsed time alone, since Pi's warmer may have refreshed
 it. It reports what the provider wrote and read.
@@ -222,7 +309,7 @@ Tool declarations stay exactly as in P, because they are part of the prefix. Whe
 
 ### 4.5 Follow-ups
 
-A follow-up converts `T ++ G ++ Q ++ A1 ++ Q2` the same way and checks it against P with C1–C3. Its content
+A follow-up converts `T ++ G ++ Q ++ A1 ++ Q2` under the same R and checks it against P with C1–C3. Its content
 extends the first aside request, so it reads the fork's own cache entry. `/aside <new question>` always starts a
 new fork from the latest observation.
 
@@ -230,13 +317,22 @@ new fork from the latest observation.
 
 Each aside request appends one Pi usage entry: `appendUsage("aside", provider, model, usage, note)`.
 - The entry stays out of the model context, as the warmer's `cache_warm` entries do.
-- **Deferred while the main agent runs.** A usage entry advances the session leaf
-  (`session-manager.js:815,864`), so mid-run writes are queued until `agent_settled`. The main run's own entries
-  then never get an aside as parent.
 - **The note** carries:
   - the tier;
   - the predicted cacheable prefix and the reported read;
   - a SHA-256 of P's canonical JSON, which joins the aside to the main request it forked from.
+
+**Writes only when idle.** A usage entry advances the session leaf (`session-manager.js:815,864`), so entries are
+queued with their origin session id and written by a drain.
+- Whenever the queue becomes non-empty, one drain task runs. It loops:
+  1. `await ctx.waitForIdle()`;
+  2. then, with no `await` in between, check `ctx.isIdle()` and that the current session is the origin;
+  3. if both hold, append every queued entry; otherwise loop.
+- This covers every return to idle, not only `agent_settled`. Two examples:
+  - a preparation failure resolves idle waiters without emitting settled (`agent-session.js:1399`);
+  - manual compaction clears the busy state on its own (`:2182`).
+- On `session_before_switch`, `session_before_fork` and `session_shutdown`, the queue is flushed synchronously if the
+  session is idle. If it is not, the entries are dropped, and the status line says how many were not recorded.
 
 pi-ctx-eval's ledger reads usage entries, so aside spend is visible to it with no special case.
 
@@ -253,8 +349,17 @@ Ctrl+S sends the discussion to the main session as one custom message, framed as
 
 | Tier | When | Request | Label |
 |---|---|---|---|
-| T0 exact | An observation exists, the API is supported, and C1–C3 pass | §4.2 | `exact` |
-| T1 rebuilt | Anything else | `conv(branch ++ Q)` on the last physical model; the virtual router (`reason: "direct"`) only if no physical model is known | `rebuilt: not expected to hit`, plus the failed check |
+| T0 exact | A ready observation exists, the API and transport are supported, K matches, and C1–C3 pass | §4.2 | `exact` |
+| T1 rebuilt | Anything else | `conv(branch ++ Q)` on the last physical model; the virtual router (`reason: "direct"`) only if no physical model is known | `rebuilt: not expected to hit`, plus the reason |
+
+**T1 is isolated from the main session's transport state.** It uses:
+- a fresh session id;
+- a stateless transport (`sse` where the adapter offers a choice);
+- no `previous_response_id`.
+
+For example, Codex's default `auto` transport would otherwise reuse the main session's socket and replace its
+continuation state (`openai-codex-responses.js:890`, `:1215`). An API with no stateless transport refuses the aside
+with a message.
 
 T1 exists so that `/aside` always answers. It costs what other packages cost, and it says so.
 
@@ -262,8 +367,8 @@ T1 exists so that `/aside` always answers. It costs what other packages cost, an
 
 ### pi-zip
 - pi-zip's handlers never see an aside, so its state cannot change through hooks.
-- P carries pi-zip's sticky `metadata.user_id`, and C1 accepts it as a top-level handler change, so the aside
-  routes to the same account.
+- P carries pi-zip's sticky `metadata.user_id`. C1 accepts it as a handler change to a field the recipe does not
+  control, so the aside routes to the same account.
 - **Known effect.** An aside's read refreshes the main cache. pi-zip's clock (`cache.ts:93-101`) counts messages
   and `cache_warm` usage entries only, so after an aside it may think the cache expired and fold, rewriting a
   prefix that was in fact warm.
@@ -271,66 +376,84 @@ T1 exists so that `/aside` always answers. It costs what other packages cost, an
     last main response's cacheable prefix, whatever its kind. This rule reads Pi's own entry format only, so
     pi-zip keeps no dependency on pi-aside.
   - pi-zip's learned cache-survival statistics (`run.ts:1602`) will also see longer survival. That is real, and
-    intended.
+    intended. It is also why I3 (§7) does not assert that later main requests are unchanged when pi-zip is
+    installed.
 
 ### Other software
-- **Pi's cache warmer (1.3.0).** It may still replay at 270 s. The replay is a cache read and harmless.
+- **Pi's cache warmer (1.3.0).** Its replays are excluded from the observation (§4.1). A replay while idle is a
+  cache read and harmless.
 - **pi-btw and other btw packages.** They use different commands and coexist.
 
 ## 6. Size
 
 | File | Purpose | Lines (estimate) |
 |---|---|---|
-| `src/observe.ts` | Logical requests, attempts, promotion, gate | ~130 |
-| `src/fork.ts` | Dry conversion, ΔH/ΔG, C1–C3, per-API list table | ~150 |
-| `src/thread.ts` | Fork loop, tool policy, deferred usage | ~130 |
+| `src/observe.ts` | Stream calls, attribution, promotion, readiness, recipe, K | ~190 |
+| `src/fork.ts` | Dry conversion, ΔH, the per-API table (list, marker, E), strip, C1–C3, auth pinning | ~200 |
+| `src/thread.ts` | Fork loop, tool policy, T1 isolation, usage drain | ~160 |
 | `src/panel.ts` | Overlay | ~140 |
 | `src/index.ts` | Wiring and command | ~80 |
-| **Total** | | **≤ 650** |
+| **Total** | | **≤ 800** |
 
 ## 7. Acceptance
 
 Everything below runs offline against a capture server unless marked live. The capture server is a local HTTP
 server that speaks the Anthropic and OpenAI SSE formats, records every request's body, URL and headers, and plays
-scripted responses. Pi is pointed at it through a test `models.json`.
+scripted responses, including a 2xx whose body is withheld. Pi is pointed at it through a test `models.json`.
 
-**Supported Pi builds.** 1.1.0, 1.2.0 and 1.3.0 are each built from a pinned lock, as in pi-ctx-eval R6.
+**Supported Pi builds.** 1.1.0, 1.2.0 and 1.3.0, each a genuinely pinned stack from pi-ctx-eval's `pi-builds`
+manifest (R6). `/tmp/rel2/pi12` is not usable: it loads pi-ai and pi-agent-core 1.3.0.
 
-**The oracle.** For each scripted state, the same question is also sent as a real next user message on a scratch
-copy of the session. That request O is the main session's true next request. The aside's T0 request must equal O
-in content and routing fields, except for the notice.
+**The oracle.** For each scripted state the harness computes O, the handler-free conversion of the frozen request
+state:
+- A scratch Pi agent runs with one test extension that replays the recorded hook outputs. Its `context` returns
+  `T ++ G ++ Q`, and its `before_provider_request` applies the recorded ΔH.
+- The recipe is R.
+- O is the request it sends.
+
+O shares pi-ai with pi-aside, but none of pi-aside's code. A second oracle, O_real, is the true next main request
+(the question sent as a real next user message on a scratch copy of the session). O_real is compared only in
+fixtures whose hook output cannot change: spy extensions, and pi-zip with no fold due.
 
 **Invariants.**
 
 | ID | Invariant | How it is checked |
 |---|---|---|
-| I1 | T0 content: the aside equals the oracle O, notice excepted; its marker-stripped list extends P's; every top-level field equals P's | Recorded bodies, for each API |
-| I2 | Routing: same URL, `metadata.user_id` / `prompt_cache_key`, non-auth headers as P; provider-derived headers as O's | Recorded requests; includes image-in-T with image-free G, and changed auth or endpoint (must give T1) |
-| I3 | No hooks, no transcript: with and without asides interleaved, the main session's later requests are byte-identical, and its session entries are identical once usage entries are removed and parents re-linked | Two scripted runs **with pi-zip 0.4.11 installed** and with a spy extension counting every hook call |
+| I1 | T0 content: the aside equals O, notice excepted, and equals O_real where O_real applies; its stripped core extends P's; every top-level field equals P's | Recorded bodies, for each API |
+| I2 | Routing: same URL, credential, `metadata.user_id` / `prompt_cache_key` and non-auth headers as P; provider-derived headers as O's | Recorded requests. Includes: image-in-T with image-free G; a different credential on the same endpoint (T1); auth changing between the check and the send (aborted, nothing sent) |
+| I3 | No hooks, no transcript. (a) A spy extension counts zero hook calls caused by asides. (b) The main session's entries are identical once `aside` usage entries are removed and parents re-linked. (c) With only extensions that do not read usage entries, the main session's later requests are byte-identical | Scripted runs with and without asides. With pi-zip 0.4.11 installed, (a) and (b) are asserted, and later-request differences are reported next to pi-zip's fold decisions |
 | I4 | At most 4 `cache_control` markers, OAuth included | Bodies |
 | I5 | Only `read`, `grep`, `find` and `ls` execute; a `bash` or `write` call produces an error result and no process or file change | Scripted tool calls |
-| I6 | Exactly one `aside` usage entry per aside request, written only while the main agent is idle; nothing in the model context | Session file, with an aside asked mid-run |
-| I7 | Timing and lifecycle: no aside request is sent before its observation's 2xx response; the wait ends on failure, abort, empty stream, retry or session switch | Capture-server timestamps; failing and empty streams; strict-tools retry; session switch mid-wait |
-| I8 | Checks are sound: every state where C1–C3 pass satisfies I1, and every scripted defect makes them fail | Fixtures: P ending in user, assistant or tool results; native system and tool changes in G; steers; images; unsigned cross-provider history; signed and encrypted reasoning; `store:false`; Responses custom tools; model or thinking change since the observation |
+| I6 | Exactly one `aside` usage entry per aside request, written only while the main agent is idle; nothing in the model context | Session file. Covers: an aside asked mid-run; a preparation failure without `agent_settled`; manual compaction; a session switch with entries queued |
+| I7 | Attribution and timing: no aside request is sent before its observation is ready; a warmer never becomes P | Capture-server timestamps. Covers: a warmer firing during a long main request (L ambiguous); a warmer payload forced in as the candidate (C1 rejects); a 2xx with a withheld body (waits for readiness); failing and empty streams; the strict-tools retry; a session switch mid-wait; Google and Codex (T1 at once) |
+| I8 | Checks are sound: every state where C1–C3 pass satisfies I1, and every scripted defect makes them fail | Fixtures: P ending in user, assistant or tool results; native system and tool changes in G; steers; images; unsigned cross-provider history; signed and encrypted reasoning; `store:false`; Responses custom tools; a model or thinking change after the observation (frozen R); native effort on Anthropic and Responses in the concurrent case (must pass); a string user message whose marker moves |
+| I9 | T1 isolation: on `openai-codex-responses` with the default transport, an aside leaves the main session's next request, socket and continuation state unchanged | Recorded requests and adapter state |
 
 **Mutants.** Each mutant must fail at least one invariant:
 - rebuild from the session instead of T;
-- a new session id;
+- a new session id at T0;
 - drop `metadata`;
 - change `max_tokens`;
 - strip or reorder `tools`;
 - put the notice in `system`;
 - add a fifth marker;
 - route the aside through the agent's `streamFn`, which runs the hooks;
-- skip the promotion wait;
+- promote on a 2xx without waiting for readiness;
+- promote the latest attempt in L without the ambiguity rule (a warmer becomes P);
 - execute `bash`;
 - a later handler replacing the payload, where a spy extension loads after pi-aside (the aside must label the
   shortfall, not claim a hit);
 - keep the first attempt instead of the promoted one after a strict-tools retry;
 - convert G alone and splice it (losing tool declarations, duplicating Responses IDs);
 - drop provider-derived headers;
+- compare `baseUrl` only, not the credential;
+- re-resolve auth for the send instead of pinning the snapshot;
 - use `ctx.model` under a virtual model;
-- write usage mid-run.
+- drain usage only on `agent_settled`;
+- T1 with the main session id or transport;
+- treat E as content (the concurrent native-effort fixture then falls to T1);
+- `strip()` without string normalisation;
+- set the legacy `systemPrompt` as well.
 
 **Comparison.** The same scripted session runs with pi-zip active (folding and sticky) against
 `@cluski/pi-by-the-way`, `@fractaal/pi-btw` (if its Pi fork is installable) and `pi-btw` 0.8.0. The capture server
@@ -348,22 +471,28 @@ Repeat once on `gateway-gpt`.
 1. **A later extension replaces the payload or the transcript.** Every claim is relative to the observation (A2).
    A shortfall shows in the panel, and the ordering is confirmed in S0.
    - The upstream ask is an observe-only `provider_request_sent { payload, headers, url }` event, or the final
-     payload in `after_provider_response`. pi-aside would feature-detect it and drop the ordering limit.
+     payload in `after_provider_response`, with a request id shared by H, R and S. pi-aside would feature-detect it
+     and drop both the ordering limit and the ambiguity rule.
    - A provider decorator would observe the final payload too. It is rejected: it would put pi-aside in the main
      request path and wrap every provider.
-2. **The dry conversion must send nothing.** S0 checks, per API and per Pi build, that an `onPayload` hook that
-   aborts prevents the HTTP call.
-3. **Relay routing.** Same metadata, headers and endpoint; S3 measures it on relay.
-4. **Payload retention.** One observation holds P, T and B0, a few MB at most. It is never written to disk and is
+2. **The dry conversion must not send the inference request.** S0 checks this per API and per Pi build. The
+   re-review's probe already found zero fetch calls on all three T0 APIs. Auth refresh before `onPayload` is
+   expected (§4.2).
+3. **Credential identity.** K is resolved in the H handler, after Pi resolved the main call's auth. A credential
+   switch inside that window is not detected. The extra resolution is on the main request path. It is normally
+   served from Pi's cache, and S0 measures it.
+4. **Relay routing.** Same credential, metadata, headers and endpoint; S3 measures it on relay.
+5. **Payload retention.** One observation holds P, T and B0, a few MB at most. It is never written to disk and is
    replaced on every main request.
-5. **Pi API drift.** Every hook used exists from Pi 0.86.1 to 1.3.0 (checked in installed builds):
+6. **Pi API drift.** Every hook used exists from Pi 0.86.1 to 1.3.0 (checked in installed builds):
    - `before_provider_request`, `before_provider_headers` and `after_provider_response`;
-   - `appendUsage`, `modelRegistry.streamSimple` and `convertToLlm`.
+   - `appendUsage`, `modelRegistry.streamSimple`, `getApiKeyAndHeaders` and `convertToLlm`.
 
-   Two hooks are newer:
+   Some hooks are newer:
    - `context_with_system` appears from 0.87.1;
    - `provider_stream_event` appears from 0.99.1. Without it, the physical model comes from P's `model` field
-     matched against the registry, and an ambiguous match gives T1.
+     matched against the registry, and an ambiguous match gives T1;
+   - `cache_warming_decision` exists only where the warmer does (1.3.0).
 
    CI covers 1.1.0, 1.2.0 and 1.3.0.
 
@@ -371,10 +500,10 @@ Repeat once on `gateway-gpt`.
 
 | Step | Content | Exit |
 |---|---|---|
-| S0 spike | Capture server. A hand-made aside on Pi 1.3.0. Five checks:<br>S1: consecutive-turn behaviour and reading the main entry;<br>S2: the dry conversion sends nothing;<br>S3: relay routing, live, a few cents;<br>S4: the `openai-responses` cache key;<br>S5: `pi install` order | Each claim confirmed, or the design changed |
+| S0 spike | Capture server; a hand-made aside on Pi 1.3.0. Nine checks:<br>S1: consecutive-turn behaviour, reading the main entry, and the last element growing;<br>S2: the dry conversion sends no inference request;<br>S3: relay routing, live, a few cents;<br>S4: the `openai-responses` cache key;<br>S5: `pi install` order;<br>S6: on Anthropic, a string user message and the same text as one block read the same cache entry;<br>S7: auth pinned from `getApiKeyAndHeaders` reproduces Pi's own headers, for an API key and OAuth;<br>S8: the H, R+, S sequence per T0 adapter, with the strict-tools fallback giving R, R, S;<br>S9: per T0 adapter, the session id keys no client-side state | Each claim confirmed, or the design changed |
 | M1 | `observe.ts`, `fork.ts`, `thread.ts`; I1, I2, I4, I6, I7 and I8 on 1.3.0 | Invariants green, mutants killed |
-| M2 | Panel and send back; I3 and I5 with pi-zip installed | Green |
-| M3 | 1.1.0 and 1.2.0; comparison run; GPT review | LAND |
+| M2 | Panel and send back; I3, I5 and I9 with pi-zip installed | Green |
+| M3 | 1.1.0 and 1.2.0 (pinned stacks); comparison run; GPT review | LAND |
 | M4 | README and release through the OIDC publish workflow | npm `pi-aside` |
 
 ## 10. Review resolutions (revision 2)
@@ -382,14 +511,32 @@ Repeat once on `gateway-gpt`.
 | # | Finding | Resolution |
 |---|---|---|
 | 1 | The capture is not necessarily what was sent; usage cannot certify it | A2 makes every claim relative to the observation. A5: usage numbers are observations. Upstream ask and the rejected provider decorator are in §8.1. Late-replacement mutant added |
-| 2 | One `context` event can produce several wire attempts | Logical request L with attempts; promotion on a 2xx response (§4.1). Strict-tools retry fixture and mutant |
+| 2 | One `context` event can produce several wire attempts | Logical request L with attempts; promotion on a 2xx response (§4.1). Strict-tools retry fixture and mutant. *Completed in rev 3 (§11, items 1 and 2)* |
 | 3 | Tail-only conversion loses system and tool state, conversion and parsing | No tail conversion: the whole fork is converted (§4.2). C2 rejects gains that change system or tools |
 | 4 | Responses item IDs are positional | Whole-fork conversion gives globally consistent IDs, and C2 verifies the shared region |
 | 5 | The splice contradicted I1; assistant boundaries unspecified | No hand splice. C2 defines "extends" over the marker-stripped list, last element included. I1 is redefined against the oracle O |
-| 6 | Captured headers miss provider-derived headers; auth can change the endpoint | Provider headers are recomputed from the full fork context; auth headers are fresh; an endpoint difference forces T1. I2 extended |
-| 7 | `appendUsage` advances the leaf | A3 permits exactly that write, like Pi's warmer. It is deferred to idle. I3 compares with usage entries removed and parents re-linked |
-| 8 | Warming changes pi-zip's later state | A3 narrowed to "no hooks, no transcript"; cache effects are intended and reported. pi-zip 0.4.12 item in §5 |
+| 6 | Captured headers miss provider-derived headers; auth can change the endpoint | Provider headers are recomputed from the full fork context; auth headers are fresh; an endpoint difference forces T1. I2 extended. *Completed in rev 3 (§11, item 4)* |
+| 7 | `appendUsage` advances the leaf | A3 permits exactly that write, like Pi's warmer. It is deferred to idle. I3 compares with usage entries removed and parents re-linked. *Completed in rev 3 (§11, item 3)* |
+| 8 | Warming changes pi-zip's later state | A3 narrowed to "no hooks, no transcript"; cache effects are intended and reported. pi-zip 0.4.12 item in §5. *Completed in rev 3 (§11, item 5)* |
 | 9 | A virtual model reruns the router | Physical model pinned from the observation. T1 uses the router only when no physical model is known, and labels it |
-| 10 | The wait lacks terminal and lifecycle transitions | §4.3 ends the wait on failure, abort, `agent_end`, switch and shutdown. I7 extended |
+| 10 | The wait lacks terminal and lifecycle transitions | §4.3 ends the wait on failure, abort, `agent_end`, switch and shutdown. I7 extended. *Completed in rev 3 (§11, items 1 and 2)* |
 | 11 | Exact cache-read equality is the wrong threshold | The prediction is the main response's `cacheRead + cacheWrite`. "Cold" is never claimed from time alone |
 | 12 | Wrong claims about pi-btw and pi-zip | pi-btw persists usage in custom entries. pi-zip registers `context_with_system`, and the attempt gate is pi-aside's own rule |
+
+## 11. Re-review resolutions (revision 3)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | An open L does not exclude warmer attempts; Pi's warmer copies the callbacks | Stream calls (H, R+, S) and an ambiguity rule: a second H, a `cache_warming_decision`, or an orphan R/S before S promotes nothing (§4.1). C1 now forbids handler changes to recipe-controlled fields, so a mistaken warmer payload (`max_tokens: 1`) fails. Fixtures and two mutants in I7 |
+| 2 | 2xx is not a started response; Google and Codex WebSocket never call `onResponse` | Promotion on S, readiness separately on the first main-assistant `message_update` or `message_end` (§4.1, §4.3). APIs without S go to T1 at once. Withheld-body fixture and mutant |
+| 3 | `agent_settled` misses some returns to idle | A drain task: `waitForIdle`, then a synchronous idle and session recheck before `appendUsage`; a synchronous flush on switch, fork and shutdown (§4.6). I6 fixtures for preparation failure, manual compaction and switch; mutant |
+| 4 | The same endpoint does not mean the same account; resolution can change before the send | Credential identity K (account id or secret hash) compared at aside time; the send is pinned to the validated snapshot, checked again in `transformHeaders` (§4.2). Residual window in §8.3. I2 fixtures; two mutants |
+| 5 | The oracle and I3 claim more than C1–C3 prove | O is the handler-free conversion of the frozen state, built by replaying the recorded hook outputs. O_real only where hook output cannot change. I3 split into (a)–(c), with (c) not asserted under pi-zip (§7) |
+| 6 | T1 can reuse the main session's socket and continuation state | T1 uses a fresh session id, a stateless transport and no `previous_response_id`; no stateless transport means a refusal (§4.8). T0 requires a stateless transport, and S9 checks it. I9 |
+| 7 | C2 rejects the concurrent case on native-effort models; strings change representation | Terminal configuration items E are split off per API and must be equal; P's last marker must lie in the core; `strip()` normalises strings to one block (§4.2). I8 fixtures (must pass), S6, two mutants |
+
+Other points taken from the re-review:
+- The dry run's claim is narrowed to the inference request (§4.2, §8.2).
+- The recipe R is frozen with T (§4.1).
+- The legacy `systemPrompt`/`tools` fields are never set (§4.2).
+- The 1.2.0 build must be a pinned stack (§7).
