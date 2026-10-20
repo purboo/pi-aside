@@ -1,6 +1,6 @@
 # pi-aside: design
 
-Status: design, revision 7 (2026-10-20). Nothing is implemented yet.
+Status: design, revision 8 (2026-10-20). Nothing is implemented yet.
 - Revision 2 answers the first GPT design review (`/tmp/aside-design-review.md`, 12 findings); see §10.
 - Revision 3 answers the re-review (7 findings, no P0); see §11. Its rule: **attribution selects a candidate, checks
   prove it**. No guarantee rests on event timing alone.
@@ -11,7 +11,10 @@ Status: design, revision 7 (2026-10-20). Nothing is implemented yet.
 - Revision 6 answers the fourth re-review (1 P1, 3 P2); see §14. A currency check in B1's `onPayload` binds the
   fresh credential to the current model object.
 - Revision 7 answers the fifth re-review (1 P1, 1 P2); see §15. B1 takes its model object and Pi takes its
-  provider in one synchronous step, so the endpoint and the credential come from one registry state.
+  provider in one synchronous step.
+- Revision 8 answers the sixth re-review (3 P1); see §16. B1 sends a private clone of the model recipe, so the
+  endpoint cannot change under it. The currency check drops object identity and adds the process environment. The
+  residual lists every input Pi and the SDKs read after that step, and I2 states it.
 
 pi-aside answers a side question about the running Pi session, at the cache-read price whenever the main cache is
 still alive and routing is unchanged. The aside request is the
@@ -273,26 +276,44 @@ Why this is enough:
   - Its routing fields (`baseUrl`, configured headers) are therefore current. Configuration can put the endpoint on
     the model (`provider-composer.js:167`), and `prepareRequest` keeps the supplied model's URL unless auth returns
     one (`model-runtime.js:471`).
-  - *Same-tick send.* B1's object is looked up with `find(provider, id)` and passed to `streamSimple` in the same
-    synchronous step, with no `await` in between. Pi starts `prepareRequest` synchronously (`lazyStream` runs its
-    setup at once, `lazy.js:36`). `prepareRequest` takes the provider, which later resolves the credential, before
-    its first `await` (`model-runtime.js:452-456`, pi-ai `models.js:336-337`). The object, which carries the
-    endpoint, and the provider therefore come from one registry state, whatever changes later. The same holds on
-    1.1.0 (`model-runtime.js:447-451`, `models.js:334-337`).
-  - *Same recipe.* B1's object must deep-equal the snapshot of B0's object, so both conversions use one recipe.
+  - *Same-tick send of a private recipe.* B1 looks up the registry's object with `find(provider, id)`, deep-clones
+    it (`structuredClone`), and passes the clone to `streamSimple` in the same synchronous step, with no `await` in
+    between. Pi starts `prepareRequest` synchronously (`lazyStream` runs its setup at once, `lazy.js:36`), and
+    `prepareRequest` takes the provider before its first `await` (`model-runtime.js:452-456`, pi-ai
+    `models.js:336-337`; on 1.1.0 `model-runtime.js:447-451`, `models.js:334-337`). Pi keeps the supplied object
+    when auth returns no URL (`model-runtime.js:471`), and the adapters read its `baseUrl` only later, after
+    preparation and lazy loading (for example `openai-responses.js:233`). Only the aside holds the clone, so the
+    endpoint those reads see is the one cloned, whatever happens to the registry's object. What this step binds is
+    the model recipe and the provider object. It binds nothing that Pi or an SDK reads later (*Residual*).
+  - *Same recipe.* The clone must deep-equal the snapshot of B0's object, so both conversions use one recipe.
     Otherwise the aside starts again from B0. C1 then proves that this recipe still reproduces P, so a
     configuration change that alters the payload fails C1 and gives T1.
-  - *Currency check.* A defence, not the binding. B1's `onPayload` runs after Pi's auth resolution and before any
-    byte is sent (all three T0 APIs on 1.1.0 and 1.3.0). There, the registry's current object must be the same
-    object (`===`, since Pi recomposes a changed provider into new objects) and deep-equal to the snapshot (to catch
-    in-place mutation). Otherwise B1 aborts, and the aside starts again. After two restarts it uses T1. An abort in
-    `onPayload` ends the stream with an error event; the restart reads the aside's own flag, not the stream result.
-  - *Residual.* Pi reads a model's configured headers after the auth `await` (`model-runtime.js:369-375`). A change
-    from A to B and back to A inside that `await` can pair B's configured headers with A's endpoint. The
-    currency check cannot see it, and Pi's own requests share it. Closing it needs a registry generation from Pi
-    (§8).
-  - Model objects are plain data (all 1,650 bundled models on 1.1.0 and 1,714 on 1.3.0 clone without loss). An
-    object with a function-valued field is compared by identity only.
+  - *Currency check.* A defence, not the binding. B1's `onPayload` runs after Pi's auth resolution and the SDK
+    client's construction, and before any byte is sent (all three T0 APIs on 1.1.0 and 1.3.0). Two conditions must
+    hold there:
+    - a fresh `find(provider, id)` deep-equals the clone. Object identity is not required: configured endpoints and
+      custom models produce a new object on every lookup (`provider-composer.js:167`, `:188`, `:190`, `:395`), so
+      an unchanged configuration must stay T0;
+    - `process.env` equals the copy B1 took just before its synchronous step, key by key.
+
+    Otherwise B1 aborts and the aside starts again; after two restarts it uses T1. An abort in `onPayload` ends the
+    stream with an error event, and the restart reads the aside's own flag, not the stream result.
+  - *Residual.* Some inputs are read after the synchronous step, inside Pi's preparation or the SDK client's
+    construction:
+    - configured headers, from the provider configuration after the auth `await` (`model-runtime.js:369-375`);
+    - an environment-backed credential, resolved after the credential store's `await` (pi-ai `auth/resolve.js:24`,
+      `provider-composer.js:290`);
+    - SDK inputs from the environment, read at client construction after `transformHeaders` and lazy loading. Examples
+      on both builds are `OPENAI_CUSTOM_HEADERS`, `OPENAI_ORG_ID` and `OPENAI_PROJECT_ID` (`openai/client.mjs:172`,
+      `:242`), and `ANTHROPIC_CUSTOM_HEADERS` (`@anthropic-ai/sdk/client.mjs:116`). A custom header can carry `Authorization`
+      or `x-api-key`.
+
+    The currency check catches a single change made inside this window, because the registry or the environment
+    still differs at `onPayload`. A change that is reverted inside the window (A → B → A) is not caught. B's header,
+    key or SDK input can then reach A's URL. Pi's own requests share every one of these windows. Closing them needs a
+    request-scoped snapshot from Pi (§8).
+  - The recipe must clone. All 1,650 bundled models on 1.1.0 and 1,714 on 1.3.0 clone without loss. An object that
+    `structuredClone` rejects, for example one with a function-valued field, gives T1.
   - If the registry no longer has the model, the aside uses T1.
 - *Credential and endpoint.* The aside passes no `apiKey`, no `baseUrl` and no auth header. Pi resolves auth once,
   inside the aside's own send (`prepareRequest`, `model-runtime.js:452`), exactly as it will for the main session's
@@ -493,7 +514,7 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
 | ID | Invariant | How it is checked |
 |---|---|---|
 | I1 | T0 content: the aside equals O, notice excepted, and equals O_real where O_real applies; its stripped core extends P's; every top-level field equals P's | Recorded bodies, for each API |
-| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), provider-derived headers as O's. No observed header value reaches the wire | Recorded requests. Includes: image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider, made before the aside starts, between B0 and B1, and inside B1's auth resolution, each as a single change A → B and as A → B → A (no key reaches another state's URL); a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). The aside follows the new configuration, credential and endpoint, and no old value reaches the capture server. A handler-added header is not carried and is named in the note |
+| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), provider-derived headers as O's. No observed header value reaches the wire | Recorded requests. Includes: image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider, made before the aside starts, between B0 and B1, and inside B1's auth resolution, each as a single change A → B and as A → B → A (no key reaches another state's URL); an unchanged configured endpoint and key, which must stay T0 with no restart; the registry's model object mutated in place during B1's preparation, its `baseUrl` set to B and restored to A before `onPayload` (the request goes to the clone's URL); an environment-backed key and an SDK custom-header variable (`OPENAI_CUSTOM_HEADERS`, `ANTHROPIC_CUSTOM_HEADERS`) changed inside the window, as A → B (caught, restart) and as A → B → A (the stated residual: the harness asserts that the main session's next request, under the same schedule, shows the same pairing, so the aside adds no exposure Pi does not have); a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). The aside follows the new configuration, credential and endpoint, and no old value reaches the capture server. A handler-added header is not carried and is named in the note |
 | I3 | No hooks, no direct writes. (a) A spy extension counts zero hook calls caused by asides. (b) Direct writes, scoped to the main session's conversation and persistent state: with pi-aside's `pi` and `ctx` proxied recursively, nested state APIs such as `ctx.sessionManager` included, the only such mutations are one `appendUsage("aside", …)` per aside request and, on Ctrl+S, one `sendMessage`. UI calls are not state. Pi's own credential persistence after an OAuth refresh inside `streamSimple` is Pi's behaviour, which the main session's next request would cause too, and is outside (b). A manual source audit backs the proxy. This is a bounded check, not a proof against every transitive write. (c) Controlled equality, Ctrl+S excluded: the main session's entries (aside entries removed, parents re-linked) and its later requests are byte-identical to a run without asides, once generated entry ids and timestamps are normalised. It applies when the capture server's main responses, usage included, do not depend on asides and only extensions that do not read usage entries are loaded | Scripted runs with and without asides. (a) and (b) are also asserted with pi-zip 0.4.11 and 0.4.12 installed. (c) is asserted neither with pi-zip nor against a real provider. A real aside changes the usage that later main messages persist (`session-manager.js:827`), and pi-zip's survival estimate and fold entries follow from it (`run.ts:1480`). With pi-zip, the harness reports entry and request differences next to pi-zip's fold decisions |
 | I4 | At most 4 `cache_control` markers, OAuth included | Bodies |
 | I5 | Only `read`, `grep`, `find` and `ls` execute; a `bash` or `write` call produces an error result and no process or file change | Scripted tool calls |
@@ -572,10 +593,12 @@ Repeat once on `sota-gpt`.
      that request keeps the same model, credential and prefix.
    - Dropping K also takes the extra auth lookup off the main request path, with its latency and possible OAuth
      refresh.
-   - A configuration change from A to B and back inside the auth `await` can pair B's configured headers with A's
-     endpoint, for the aside and for Pi's own requests alike (§4.2, *Residual*). The upstream ask is a registry
-     generation, or configured headers read before the `await`. pi-aside would feature-detect either and check it in
-     `onPayload`.
+   - A change from A to B and back inside Pi's preparation can pair B's configured headers, environment-backed key
+     or SDK environment input with A's endpoint, for the aside and for Pi's own requests alike (§4.2, *Residual*). A
+     registry generation alone would not close it, because environment-only changes bypass the registry. The
+     upstream ask is a request-scoped snapshot: registry state and the environment captured once when
+     `prepareRequest` starts and used for every later read, including the SDK client's options. pi-aside would
+     feature-detect it and check it in `onPayload`.
 4. **Relay routing.** The same metadata as P, and the same auth and endpoint resolution as the main session's next
    request. S3 measures it on s2a.
 5. **Payload retention.** One observation holds P, T and B0, a few MB at most. It is never written to disk and is
@@ -680,4 +703,12 @@ object, as in Pi (`sdk.js:205`).
 |---|---|---|
 | 1 | An A → B → A change passes a snapshot check while auth keeps B's provider and the object carries A's endpoint | B1 looks up its model object and calls `streamSimple` in one synchronous step, and Pi takes the provider before its first `await`, so the endpoint and the credential share one registry state. The `onPayload` check stays as a defence and adds identity. The residual (configured headers read after the `await`, shared with Pi's own requests) is stated, and its fix needs a Pi generation (§4.2, §8). I2 runs A → B → A at three points; one mutant |
 | 2 | Follow-ups promised an unconditional hit | Conditional, as in §4.2 (§4.5) |
+
+## 16. Sixth re-review resolutions (revision 8)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | The currency check required object identity, but configured endpoints and custom models give a new object on every lookup, so an unchanged configuration never stayed T0 | Identity dropped; deep equality kept. I2 adds an unchanged-endpoint fixture that must stay T0 with no restart (§4.2) |
+| 2 | Passing the registry's object does not fix its endpoint: adapters read `baseUrl` later, and an in-place change undone before `onPayload` sent A's key to B's URL | B1 sends a private `structuredClone` of the recipe; an object that does not clone gives T1. I2 adds the in-place mutation fixture (§4.2) |
+| 3 | The residual named only configured headers; environment-backed keys and SDK environment headers are read later too | The residual lists all three. The currency check compares `process.env`, which catches single changes; reverted changes are the stated residual, shared with Pi, and I2 asserts parity with the main session's next request. §8 asks Pi for a request-scoped snapshot, since a registry generation cannot see environment changes |
 
