@@ -12,4 +12,9 @@ serves the whole conversation from the main session's prompt cache. The main ses
 requests and every extension's state stay exactly as they were. Each answer shows how much the provider read from
 cache.
 
-Status: design. See [docs/design.md](docs/design.md).
+The proposed interaction needs no new key: while the agent is busy, a message ending in a question mark is asked
+on the side, and everything else keeps the meaning Pi gives it.
+
+Status: design, nothing is implemented yet.
+- [docs/design.md](docs/design.md): the engine (observation, cache tiers, checks, accounting).
+- [docs/ux.md](docs/ux.md): the interaction design (what the user sees and does).
