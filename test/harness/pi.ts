@@ -87,6 +87,7 @@ export class PiRpc {
 		readonly agentDir: string,
 		readonly sessionDir: string,
 		readonly cwd: string,
+		private readonly ownsCwd = false,
 	) {
 		child.stdout!.setEncoding("utf8");
 		child.stdout!.on("data", (chunk: string) => this.onData(chunk));
@@ -208,6 +209,7 @@ export class PiRpc {
 		}
 		rmSync(this.agentDir, { recursive: true, force: true });
 		rmSync(this.sessionDir, { recursive: true, force: true });
+		if (this.ownsCwd) rmSync(this.cwd, { recursive: true, force: true });
 	}
 }
 
@@ -248,7 +250,7 @@ export async function startPi(options: PiOptions): Promise<PiRpc> {
 	});
 	for (const k of ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]) delete env[k];
 	const child = spawn("node", args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-	const pi = new PiRpc(child, agentDir, sessionDir, cwd);
+	const pi = new PiRpc(child, agentDir, sessionDir, cwd, options.cwd === undefined);
 	// Ready once it answers a command.
 	await pi.send({ type: "get_state" }, 30_000);
 	return pi;

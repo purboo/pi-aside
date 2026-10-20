@@ -26,6 +26,10 @@ export default function probe(pi: ExtensionAPI): void {
 			else if (Array.isArray(payload.input)) payload.prompt_cache_key = "sticky-key-1";
 			else payload.user = "sticky-user-1";
 		}
+		if (process.env.PROBE_REPLACE === "1") {
+			// A replacement, as pi-zip returns: invisible to extensions loaded earlier.
+			return { ...payload, metadata: { user_id: "late-replacement" } };
+		}
 		if (process.env.PROBE_REWRITE === "1") {
 			const list = payload.messages ?? payload.input;
 			const first = list?.find((m: { role?: string }) => m.role === "user");

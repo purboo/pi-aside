@@ -65,7 +65,6 @@ export function panelBody(state: PanelState, width: number, theme: Theme): strin
 		}
 		if (turn.aborted) lines.push(dim("stopped"));
 		if (turn.error) lines.push(theme.fg("error", `aside failed: ${turn.error}`));
-		if (parsed.handoff) lines.push(dim(`⇥ ${parsed.handoff}`));
 	}
 	const money = moneyLine(turn);
 	if (money) lines.push(dim(money));
@@ -93,7 +92,7 @@ export function renderPanel(state: PanelState, width: number, theme: Theme): str
 /** Below the editor: the hint before an Enter that asks on the side, or the handoff ghost text. */
 export function renderBelow(input: { hint: boolean; ghost: string | undefined }, width: number, theme: Theme): string[] {
 	const lines: string[] = [];
-	if (input.ghost) lines.push(truncateToWidth(theme.fg("dim", `⇥ ${input.ghost}`), width));
+	if (input.ghost) lines.push(truncateToWidth(theme.fg("dim", `⇥ ${input.ghost}  (tab accepts)`), width));
 	if (input.hint) lines.push(truncateToWidth(theme.fg("dim", HINT), width));
 	return lines;
 }
