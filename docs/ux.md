@@ -1,6 +1,6 @@
 # pi-aside: interaction design
 
-Status: proposal, revision 4 (busy includes waiting for subagents, §3.1 and §3.8; follow-ups see the latest main state, §3.2). This document covers only what the user sees and does. The engine in `design.md`
+Status: implemented, revision 5 (§4: Enter is routed through Pi's `input` event, and the ghost text is a line below the editor; §3.2: an answer still streaming does not collapse; see `implementation.md` §2). Revision 4: busy includes waiting for subagents (§3.1, §3.8), and follow-ups see the latest main state (§3.2). This document covers only what the user sees and does. The engine in `design.md`
 (observation, T0/T1, C1–C3, routing, accounting) changes in two places only: follow-ups fork again when the main session has moved (§3.2), and a fork-point breakpoint is proposed (§5.5). Revision 1 is critiqued in §7.
 
 ## 1. The goal
@@ -101,7 +101,7 @@ question mark is a steer, exactly as today.
   never answers from a stale snapshot. This amends `design.md` §4.5, which always continues
   `T ++ G ++ Q ++ A1 ++ Q2`.
 - **Dismissal needs no key.** When the user next sends anything to the agent, the panel collapses to one dim line
-  (`▸ why did it pick B?`). The next aside replaces it, and a session switch clears it.
+  (`▸ why did it pick B?`). An answer still streaming stays expanded: the user is waiting for it. The next aside replaces it, and a session switch clears it.
 - **Long answers.** While streaming, the panel shows the last 10 lines. When the answer is done, it shows the
   first 10 lines and `… /aside to read all`. `/aside` with no argument opens the latest aside in a reader overlay.
   The reader is an explicit modal with its own footer, and Esc closes it, as in every Pi selector.
@@ -228,14 +228,16 @@ Revision 1 had Tab with three meanings, Esc meaning "dismiss", and a focus mode.
 |---|---|
 | The route check's fallback steer | `pi.sendUserMessage` with steer delivery, as in `design.md` §4.7 |
 | The waiting state (§3.1) | `pi.events` (`emit`, `on`; `dist/core/event-bus.d.ts`); one emitter in pi-durable-subagents |
-| Intercept Enter when the text ends in `?` and the agent runs; Tab on an empty editor with a pending handoff | `ctx.ui.onTerminalInput` (returns `consume`), `getEditorText`, `ctx.isIdle()` |
+| Route a submitted text that ends in `?` while the agent runs | Pi's `input` event (`handled` or `continue`; `streamingBehavior` tells a steer from a follow-up), `ctx.isIdle()`. Implemented this way instead of intercepting the key, so a remapped submit key, bracketed paste and IME need no special handling |
+| Tab on an empty editor with a pending handoff; refreshing the hint | `ctx.ui.onTerminalInput` (returns `consume`), `getEditorText` |
 | The hint below the editor and the panel above it | `ctx.ui.setWidget(key, …, { placement })` |
 | Accept the handoff | `ctx.ui.setEditorText` |
 | Reader overlay | `ctx.ui.custom(…, { overlay: true })` |
 | The handoff's side note | `pi.sendMessage` (custom message), delivered with the user's message |
 
 Ghost text drawn *inside* the editor would need `setEditorComponent`, which conflicts with other editor
-replacements. Drawing it as a `belowEditor` widget line avoids that. S0-UX decides between the two.
+replacements. The implementation draws it as a dim `belowEditor` widget line, `⇥ <suggestion>  (tab accepts)`, shown
+only while the editor is empty.
 
 ## 5. Risks and how they are measured
 
