@@ -1,0 +1,299 @@
+version: 1
+trunk: main
+# Gates are pinned from the base: a writer cannot weaken them.
+closure: ["plan.yaml", "gates/**", "tsconfig.json"]
+setup: "bun install --frozen-lockfile && bun run link-pi"
+exec:
+  parallel: 2
+drive:
+  max: 3
+  repairs: 3
+  measure: 1
+  writer: { agent: worker, model: "relay/claude-opus-5-5:high" }
+  reviewer: { agent: owed-reviewer, model: "gateway-gpt/gpt-6.1-sol:high" }
+invariants:
+  - id: unit
+    run: "bash gates/bun-test.sh"
+    timeout_s: 900
+    min_tests: 1
+  - id: types
+    run: "bunx tsc --noEmit -p ."
+    timeout_s: 300
+
+nodes:
+  - id: text
+    title: "UX text rules: question-mark detection, Enter routing, route and handoff line parsing (ux §3.1, §3.3, §3.4, U9)"
+    writes: ["src/qmark.ts", "src/reply.ts", "test/qmark.test.ts", "test/reply.test.ts"]
+    checks:
+      - id: gate
+        run: "bun gates/text.ts"
+        timeout_s: 60
+      - id: text-unit
+        run: "bash gates/bun-test.sh test/qmark.test.ts test/reply.test.ts"
+        timeout_s: 120
+        red: true
+        tests: ["test/qmark.test.ts", "test/reply.test.ts"]
+        min_tests: 12
+    review: {count: 1, min_rank: 1}
+    brief: |
+      Implement two pure modules, with no imports from Pi, exactly as the pinned gate gates/text.ts exercises them.
+      Read first: docs/ux.md §3.1 (the question-mark rule and the routing table), §3.3 (handoff ghost text) and §3.4
+      (the route check), then gates/text.ts. The gate is the contract; do not change it.
+
+      src/qmark.ts
+      - `endsWithQuestionMark(text: string): boolean`. Remove trailing characters repeatedly while the last one is
+        whitespace (Unicode, U+3000 included), closing punctuation (Unicode Pe), final-quote punctuation (Unicode Pf),
+        or an ASCII `"` or `'`. True if what remains ends in `?` (U+003F), `？` (U+FF1F), `؟` (U+061F) or U+037E.
+        Never true when the end of the text lies inside a fenced code block, using CommonMark fence rules: an opening
+        line of at least three backticks or tildes, indented at most three spaces (a backtick fence's info string
+        contains no backtick); it closes only with the same character, at least as long, and nothing but whitespace
+        after it. No word lists, no other languages' particles.
+      - `routeEnter({ text, busy, key }: { text: string; busy: boolean; key: "submit" | "followUp" }): "side" | "pi"`.
+        "side" only for key "submit" while busy, when the text (leading whitespace ignored) does not start with `/`
+        (slash commands) or `!` (Pi's shell escape), and endsWithQuestionMark(text). Everything else is "pi".
+
+      src/reply.ts
+      - `parseReply(raw: string, done: boolean): { route: "side" | "agent" | undefined; body: string; handoff: string | undefined }`.
+        `raw` is the aside model's text so far; `done` says the stream has ended. CRLF counts as LF.
+        - Route line: the first non-blank line. After trimming and removing leading/trailing `*` and backticks, it is a
+          route line when it matches `route : side|agent` case-insensitively, with any spacing around the colon.
+          The route line is never part of the body.
+        - Until that first line is decided, route is undefined and body is empty. It is decided when it is terminated
+          by a newline, or when `done`, or while streaming as soon as its cleaned, lower-cased text can no longer
+          become a route line (it is not a prefix of one). A decided first line that is not a route line means route
+          "side" and the line is part of the body (the model forgot the line; the user asked on the side).
+        - Handoff: when `done`, a last non-blank line matching `handoff:` (case-insensitive, leading spaces allowed)
+          is removed from the body; its trimmed value is the handoff, except that an empty value or `none` gives
+          undefined. A `handoff:` line that is not the last non-blank line stays in the body. While streaming, an
+          unterminated last line that starts with `handoff:` or is a non-empty prefix of `handoff:` is hidden from the
+          body, and handoff stays undefined.
+        - body is trimmed at both ends; inner blank lines are kept.
+
+      Tests: test/qmark.test.ts and test/reply.test.ts with your own cases beyond the gate's, at least 12 tests in total
+      (for example: nested closers such as `?)"` and `?」）`, fences with info strings, a tilde fence closed by
+      backticks (stays open), a route line split across chunks fed incrementally, a handoff line arriving in pieces).
+      Code style: TypeScript, tabs, ES modules with `.ts` import suffixes, no dependencies. Everything in English.
+
+  - id: harness
+    title: "Offline test harness: capture server for three provider APIs, real Pi over RPC, real Pi TUI in tmux"
+    writes: ["test/harness/", "docs/harness.md"]
+    checks:
+      - id: harness-unit
+        run: "bash gates/bun-test.sh test/harness"
+        timeout_s: 600
+        red: true
+        tests: ["test/harness/**"]
+        min_tests: 10
+    review: {count: 1, min_rank: 1}
+    brief: |
+      Build the offline harness that every later node uses to drive a real Pi against a local server. Read first:
+      docs/design.md §7 (the capture server, the oracle, the RPC-driven tests) and docs/ux.md §6 (key replay tests),
+      then Pi's docs in node_modules/@earendil-works/pi-coding-agent/docs (rpc.md, rpc-commands.md,
+      rpc-extension-ui.md, models.md, settings.md, environment-variables.md, keybindings.md, extensions.md). The Pi
+      under test is node_modules/@earendil-works/pi-coding-agent (`bun run link-pi` links it to the installed 1.3.0);
+      pi-ai's adapters are in node_modules/@earendil-works/pi-ai/dist/api/. Never use the network beyond 127.0.0.1,
+      never read or write ~/.pi, and never send a request to a real provider.
+
+      Put the code in test/harness/ with one entry, test/harness/index.ts, that later code imports. Document the API
+      with short examples in docs/harness.md.
+
+      1. Capture server (`startCaptureServer()`): an HTTP server on 127.0.0.1 with a random port that speaks, as
+         pi-ai's adapters consume them, `anthropic-messages` (POST /v1/messages, SSE), `openai-responses`
+         (POST /v1/responses, SSE) and `openai-completions` (POST /v1/chat/completions, SSE). It records every request:
+         sequence number, arrival time, response start and end times, method, path, URL, all headers (lower-cased
+         names), the raw body and the parsed JSON. Responses are scripted: a queue (and optionally a function of the
+         request) of responses, each one of: streamed text (chunk count and delay between chunks), tool calls (name
+         and JSON arguments), an optional thinking/reasoning block, reported usage (input, output, cache read, cache
+         write, in each API's own usage fields), the stop reason, an HTTP error (status and body, e.g. a 400 like
+         Anthropic's strict-tools rejection, a 429 or a 500), a 2xx whose body is withheld until the test releases it,
+         or a hang until the client aborts. An empty queue answers with a short default text and marks the record as
+         defaulted. Helpers: `waitForRequests(n, timeoutMs)` and a predicate wait.
+      2. Pi over RPC (`startPi(options)`): spawns the Pi CLI under test in `--mode rpc`, isolated: a fresh temporary
+         `PI_CODING_AGENT_DIR` holding a generated models.json (three providers pointing at the capture server, one
+         per API, with fake API keys such as `test-key-anthropic` so tests can assert credentials; models with and
+         without reasoning, so native effort and reasoning can be exercised), a settings.json built from the options
+         (and nothing from the user's agent dir: no packages, no auth.json), `PI_OFFLINE=1`,
+         `PI_SKIP_VERSION_CHECK=1`, a temporary cwd unless given, a temporary `--session-dir` (sessions are persisted
+         so tests can read the session file), extension paths passed with `-e`, extra env, and the provider, model
+         and thinking level to use. The Pi entry point is overridable (option and env `PI_ASIDE_PI_DIR` naming a
+         pi-coding-agent package dir), so later nodes can run other Pi builds. The client: send any RPC command with
+         id correlation (prompt, including extension commands such as `/name args`, steer, follow_up, abort,
+         get_state, get_messages, get_entries, new_session, switch_session, ...), record every event,
+         `waitForEvent(predicate, timeoutMs)`, collect `extension_ui_request` records (notify, setStatus, setWidget and
+         the rest) with configurable answers for dialogs, capture stderr, give the session file path, and shut down
+         cleanly (kill after a timeout; no orphan processes).
+      3. Pi TUI in tmux (`startPiTui(options)`): the same isolation and options, but the interactive TUI inside a
+         detached tmux session of fixed size (for example 120x40) on its own tmux socket (`tmux -L <unique>`) so it
+         never touches the user's tmux server. Helpers: send literal text (UTF-8, including CJK), named keys (Enter,
+         Escape, Tab, Alt+Enter, Ctrl+C, arrows), a bracketed paste, capture the screen as plain text,
+         `waitForScreen(regex, timeoutMs)`, and clean shutdown of the session and socket.
+
+      Tests (test/harness/, at least 10, each with an explicit timeout, all passing reliably and together in under
+      3 minutes): a prompt round trip through real Pi for each of the three APIs, with the recorded body and the
+      reply text from get_last_assistant_text; a scripted tool call where Pi runs its `read` tool on a temporary file
+      and the second request carries the tool result; a withheld 2xx that keeps Pi streaming until released; an
+      error status surfacing as an error; an extension loaded with `-e` that counts `before_provider_request` calls
+      and calls `ctx.ui.notify`, seen as an extension_ui_request; the session file is written in the temporary
+      session dir and contains the conversation; isolation (the temporary agent dir is used, the user's is not); the
+      TUI driver shows Pi's editor, types a prompt, submits it with Enter and sees the reply on screen; no process
+      or tmux session is left behind. Code style: TypeScript, tabs, ES modules with `.ts` import suffixes, no new
+      dependencies. Everything in English.
+
+  - id: s0-events
+    title: "S0 spike, events: provider event sequence per T0 API (S8), dry conversion sends nothing (S2), no client-side session state (S9), install order (S5), the warmer"
+    deps: [harness]
+    writes: ["spike/events/", "docs/s0/events.md"]
+    checks:
+      - id: claims
+        run: "bun spike/events/run.ts"
+        timeout_s: 900
+    review: {count: 1, min_rank: 1}
+    brief: |
+      Confirm or refute, on the installed Pi 1.3.0 and offline, the event-level claims the engine design rests on.
+      Read first: docs/design.md §4.1 (observation, attribution rules), §4.2 (the dry run, supported APIs), §8 risks 1,
+      2 and 6, §9 (S0: S2, S5, S8, S9), then docs/harness.md. Use the harness (test/harness/index.ts) and probe
+      extensions loaded with `-e`. Cite Pi and pi-ai code as file:line in the installed packages.
+
+      Claims, each for anthropic-messages, openai-responses and openai-completions over HTTP/SSE where it applies:
+      - S8a. One main request emits, to an extension: `context_with_system`, then `before_provider_headers` once, then
+        `before_provider_request` once, then `after_provider_response` once, then the assistant `message_update`s and
+        `message_end`. Record where `provider_stream_event` falls and what it carries. The header map a handler sees
+        is the object Pi sends (an in-place mutation by the probe reaches the capture server); the same for the
+        payload object of `before_provider_request` (in-place mutation reaches the wire, and a returned replacement
+        replaces it).
+      - S8b. `after_provider_response` fires before any provider event is read: with a withheld 2xx body, S arrives
+        and no `message_update` arrives until the body is released.
+      - S8c. A failed attempt (scripted error) emits no `after_provider_response`.
+      - S8d. Anthropic's strict-tools fallback (anthropic-messages.js around 436-454; find the trigger) gives H, R, R, S,
+        and the body that succeeds at the capture server equals the second R's payload.
+      - S8e. SDK-level retries (a scripted 500 or 429 followed by success) resend the same payload without a new R.
+        Record the counts of H, R and server requests.
+      - S8f. Pi's cache warmer (cache-warmer.js): find what makes it replay and make it fire in a test (settings, a
+        short TTL, a fake clock, whatever the code allows without patching Pi). Record its sequence:
+        `cache_warming_decision`, then H, R, S reaching extension handlers, its payload's `max_tokens`, and that it
+        emits no agent message events. If it cannot be made to fire offline, cite the code that establishes each fact.
+      - S2. A dry conversion from an extension, `ctx.modelRegistry.streamSimple(model, context, { onPayload })` where
+        onPayload records the payload and aborts, sends zero requests to the capture server. Find the abort that
+        works (throw, abort signal, ...), what the stream then yields, and confirm that auth resolution (a provider
+        key from an env var or command) happened before onPayload. Also: that streamSimple call reaches no extension
+        handler (a spy extension counts zero H, R and S for it).
+      - S9. Per T0 adapter, the session id keys no client-side state: no socket, no continuation cache, no
+        previous_response_id added. Cite the adapter code, and probe two streamSimple calls with the same session id
+        and different contexts.
+      - S5. In a temporary agent dir, `pi install <local package dir>` appends to the settings `packages` list, and
+        extension handlers run in that list's order, so a newly installed package runs last among packages. Also
+        record where `-e` extensions, project-local extensions and built-ins run relative to packages
+        (resource-loader.js around 571). Never install into the user's real agent dir.
+
+      Deliverables: spike/events/ (probe extensions and drivers) with the entry spike/events/run.ts, which runs every
+      probe, prints one line per claim (`PASS`/`FAIL` with the observed values) and exits 0 only if every claim holds
+      as docs/design.md states it; docs/s0/events.md with, per claim, the verdict, the evidence (event logs, recorded
+      requests, code citations) and, where the design's wording is wrong or incomplete, the exact correction to make.
+      If a claim does not hold, do not weaken the script or restate the claim yourself: ask the parent (Decision
+      needed) with the evidence and a proposed design change. Code style: TypeScript, tabs, `.ts` import suffixes, no
+      new dependencies. Everything in English.
+
+  - id: s0-aside
+    title: "S0 spike, hand-made aside: observe P, dry B0, B1 = conv(T ++ G ++ Q), ΔH, C1–C3, send F, offline on three APIs"
+    deps: [harness]
+    writes: ["spike/aside/", "docs/s0/aside.md"]
+    checks:
+      - id: claims
+        run: "bun spike/aside/run.ts"
+        timeout_s: 900
+    review: {count: 1, min_rank: 1}
+    brief: |
+      Build a crude, throwaway aside as a probe extension and prove, offline on the installed Pi 1.3.0, that the core
+      of the engine design works. Read first: docs/design.md §2, §4.1, §4.2 (B0, B1, ΔH, F, strip, E, C1–C3, the
+      notice), §4.5, §4.8, and docs/ux.md §5 risk 5 (the fork-point breakpoint), then docs/harness.md. Use the harness
+      (test/harness/index.ts). This is a spike: favour clarity over completeness, but every claim must be asserted on
+      recorded request bodies, not inferred.
+
+      The probe extension records T (the `context_with_system` messages after earlier handlers), the session leaf and
+      the recipe (model identity, thinking level and budgets, token limit, cache retention, session id, transport) at
+      `context_with_system`; keeps H and R by reference; promotes the latest R into P (a deep clone) on
+      `after_provider_response`; marks readiness on the first `message_update` or the `message_end`. A command
+      `/aside-probe <question>` then builds B0 = conv_R(T) dry (onPayload records and aborts), G from the branch since
+      the observation (with a "still running" tool result for any tool call that has none yet), Q = a user message
+      with a short notice plus the question, B1 = conv_R(T ++ G ++ Q) through `ctx.modelRegistry.streamSimple` with the
+      model object looked up in the registry and cloned, computes ΔH = diff(B0, P) and F = B1 with ΔH applied, runs
+      C1, C2 and C3, and sends F to the capture server, reporting the checks through `ctx.ui.notify`.
+
+      Claims, each asserted on recorded bodies for anthropic-messages, openai-responses and openai-completions unless
+      noted:
+      - A1 (C1 baseline). With no other extension, strip(B0's content list) equals strip(P's), and every
+        recipe-controlled top-level field is equal: on the first turn; after a tool round; with a thinking level on
+        (Anthropic native effort, the trailing E item; Responses reasoning).
+      - A2 (concurrent). Asked while the main reply streams (withheld body), C2 passes: E(B1) = E(B0), the stripped
+        core of B1 extends B0's, with the last user element extended by the question (user ⊕ question). The aside
+        request reaches the server only after the observation is ready.
+      - A3 (idle). After the turn ends, G holds the reply and tool results; C1–C3 pass; F's stripped core extends P's.
+      - A4 (still running). Asked during a slow tool execution, the pending call gets a placeholder result, C2 passes.
+      - A5 (handlers). A spy extension loaded before the probe that sets `metadata.user_id` in
+        `before_provider_request`: ΔH carries it, C1 accepts, F carries it. A spy that rewrites a message: C1 fails
+        (T1 would be used).
+      - A6 (S1 offline). In consecutive main turns, request N+1's stripped core extends request N's.
+      - A7 (strip). pi-ai turns the last user message's string content into a block when it attaches a marker
+        (anthropic-messages.js around 1236-1241); strip() with string normalisation makes B0 and B1 comparable.
+      - A8 (markers, I4). Count `cache_control` markers in P and F on Anthropic (at most 4) and record where pi-ai
+        places them. For ux.md's fork-point breakpoint: is a fifth slot needed, and how many markers does an OAuth
+        Anthropic request use (cite code if OAuth cannot be exercised offline)? Can a marker sit on an assistant block?
+      - A9 (no hooks). The aside's own request reaches no extension handler (a spy counts zero H, R and S for it) and
+        appends nothing to the session.
+      - A10 (headers, observed only). Record the aside's request headers next to the main request's (same URL, same
+        credential, the attribution and SDK headers such as `X-Stainless-*`), and list each difference with its cause.
+        This claim passes when the record is complete; design.md §4.2's header synthesis is built later.
+
+      Deliverables: spike/aside/ (the probe extension and drivers) with the entry spike/aside/run.ts, which runs every
+      scenario, prints one line per claim (`PASS`/`FAIL` with observed values) and exits 0 only if every claim holds;
+      docs/s0/aside.md with, per claim, the verdict and evidence, the per-API table (content list name, marker key, E
+      shape) as observed, and every place where docs/design.md is wrong or incomplete, with the exact correction. If
+      a claim does not hold, do not weaken the script or restate the claim yourself: ask the parent (Decision needed)
+      with the evidence and a proposed design change. Code style: TypeScript, tabs, `.ts` import suffixes, no new
+      dependencies. Everything in English.
+
+  - id: s0-ux
+    title: "S0-UX spike: Enter interception, paste, IME, remapped submit, widgets, ghost text and Tab, in the real Pi TUI"
+    deps: [harness]
+    writes: ["spike/ux/", "docs/s0/ux.md"]
+    checks:
+      - id: claims
+        run: "bun spike/ux/run.ts"
+        timeout_s: 900
+    review: {count: 1, min_rank: 1}
+    brief: |
+      Confirm or refute, in the real Pi 1.3.0 TUI driven through the harness's tmux driver (startPiTui), that the
+      interaction design can be built with Pi's extension API. Read first: docs/ux.md (all of it; §3.1, §3.2, §3.3,
+      §3.7, §4 and §5 risk 4 matter most), Pi's docs/extensions.md, docs/tui.md and docs/keybindings.md, the types in
+      node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts, then docs/harness.md. Keep the agent
+      busy with a capture-server response that streams slowly or is withheld.
+
+      Claims:
+      - X1. `ctx.ui.onTerminalInput` sees the submit key before the editor acts on it, can consume it, can read the
+        editor text (`getEditorText`) and clear it (`setEditorText`), and the text does not reach the agent. When it
+        does not consume, Pi's meaning is unchanged: while running, Enter steers (the steer reaches a later captured
+        request); Alt+Enter queues a follow-up.
+      - X2. Consumption is decided per keypress: only while busy and only when the text ends in a question mark
+        (`?` or `？`); otherwise Pi's meaning, with no visible difference.
+      - X3. A bracketed paste containing `?` followed by a newline does not trigger the interception and inserts the
+        text as without the extension.
+      - X4. CJK text committed by an IME (UTF-8 sent directly, such as `为什么？`) followed by Enter is intercepted like
+        ASCII text.
+      - X5. With `tui.input.submit` remapped in keybindings.json, the extension finds the submit key through Pi's
+        keybinding API or configuration (find how; do not hard-code Enter) and the remapped key is the one
+        intercepted, while plain Enter keeps whatever Pi gives it.
+      - X6. `ctx.ui.setWidget` with placement aboveEditor and belowEditor renders where docs/ux.md §3.2 draws it,
+        updates while the agent streams, and never takes focus: Esc still aborts the agent with the panel visible.
+      - X7. Ghost text: compare a belowEditor widget line with `setEditorComponent`. Tab on an empty editor with a
+        pending suggestion puts it into the editor, and Tab in a non-empty editor still does Pi's autocomplete (for
+        example a slash command or a path). Record which approach works and conflicts with what.
+      - X8. Detecting busy: `ctx.isIdle()` from inside the input handler is accurate during streaming, tool execution
+        and after agent_end.
+
+      Deliverables: spike/ux/ (probe extensions and drivers) with the entry spike/ux/run.ts, which runs every scenario,
+      prints one line per claim (`PASS`/`FAIL` with observed values) and exits 0 only if every claim holds;
+      docs/s0/ux.md with, per claim, the verdict, the evidence (quoted screen captures, code citations as file:line),
+      the recommended approach for the ghost text and the input hook, and every place where docs/ux.md is wrong or
+      incomplete, with the exact correction. If a claim does not hold, do not weaken the script or restate the claim
+      yourself: ask the parent (Decision needed) with the evidence and a proposed design change. Code style:
+      TypeScript, tabs, `.ts` import suffixes, no new dependencies. Everything in English.

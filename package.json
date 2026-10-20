@@ -1,0 +1,38 @@
+{
+  "name": "pi-aside",
+  "version": "0.0.0",
+  "description": "Pi extension: ask a side question about a running session without touching it, at the cache-read price.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/purboo/pi-aside.git"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "tsc --noEmit && bun test",
+    "link-pi": "D=\"$(dirname \"$(readlink -f \"$(command -v pi)\")\")/../../..\" && mkdir -p node_modules/@earendil-works && for p in pi-ai pi-agent-core pi-coding-agent pi-tui; do rm -rf node_modules/@earendil-works/$p; ln -sfn \"$(cd \"$D/$p\" && pwd)\" node_modules/@earendil-works/$p; done"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.13",
+    "@types/node": "^26.6.4",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-agent-core": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true }
+  },
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  }
+}
