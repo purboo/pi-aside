@@ -1,11 +1,13 @@
 # pi-aside: design
 
-Status: design, revision 4 (2026-10-20). Nothing is implemented yet.
+Status: design, revision 5 (2026-10-20). Nothing is implemented yet.
 - Revision 2 answers the first GPT design review (`/tmp/aside-design-review.md`, 12 findings); see §10.
 - Revision 3 answers the re-review (7 findings, no P0); see §11. Its rule: **attribution selects a candidate, checks
   prove it**. No guarantee rests on event timing alone.
 - Revision 4 answers the second re-review (4 findings); see §12. Credentials follow the **next-request rule**: the
   aside uses Pi's auth resolution at send time, as the main session's next request would.
+- Revision 5 answers the third re-review (3 P1, 1 P2); see §13. Routing is computed fresh, never copied: the
+  current model object, Pi's auth, and synthesised default headers. T0 promises content fidelity, not a cost.
 
 pi-aside answers a side question about the running Pi session at the cache-read price. The aside request is the
 request the main session would send next if the question were the user's next message. It is computed without
@@ -166,7 +168,8 @@ WebSocket path (`openai-codex-responses.js:198`). These APIs are not T0 APIs (§
 T1 at once instead of waiting for an event that never comes.
 
 **The recipe R.** The conversion inputs are frozen at `context_with_system`:
-- the physical model and API;
+- the physical model's identity: provider, id and API. The model object, which also carries routing, is looked up
+  at aside time (§4.2);
 - the effective reasoning level and the thinking budgets;
 - the token limit and cache retention;
 - the session id and transport;
@@ -253,35 +256,46 @@ Why this is enough:
 - The request is sent through `ctx.modelRegistry.streamSimple`, which runs no extension hook. Pi wires handlers
   only into the agent's `streamFn` (`sdk.js:225-230`).
 
-**Routing.**
-- *Model.* The physical model comes from the observation, never from `ctx.model`, so a virtual model's router is
-  not invoked.
-- *Credential and endpoint: the next-request rule.* The aside passes no `apiKey`, no `baseUrl` and no auth header.
-  Pi resolves auth once, inside the aside's own send (`prepareRequest`, `model-runtime.js:452`), exactly as it will
-  for the main session's next request. Pi's own warmer replays the same way. Nothing is checked before the send, so
-  no window exists between a check and the send.
+**Routing: the next-request rule.** Content is P's, and it is checked. Routing is the main session's next request's,
+and it is computed fresh, never copied from the observation. The aside never sends an observed routing value.
+- *Model.* The physical model's identity (provider, id, API) comes from the observation, never from `ctx.model`, so
+  a virtual model's router is not invoked. The model *object* is looked up in `ctx.modelRegistry` at aside time:
+  - Its routing fields (`baseUrl`, configured headers) are therefore current. Configuration can put the endpoint on
+    the model (`provider-composer.js:167`), and `prepareRequest` keeps the supplied model's URL unless auth returns
+    one (`model-runtime.js:471`).
+  - Both conversions in this section use that object. C1 then proves that it still reproduces P. A configuration
+    change that alters the payload therefore fails C1 and gives T1.
+  - If the registry no longer has the model, the aside uses T1.
+- *Credential and endpoint.* The aside passes no `apiKey`, no `baseUrl` and no auth header. Pi resolves auth once,
+  inside the aside's own send (`prepareRequest`, `model-runtime.js:452`), exactly as it will for the main session's
+  next request. Pi's own warmer replays the same way. Nothing is checked before the send, so no window exists
+  between a check and the send.
   - *Why not bind to P's credential.* Pi keeps the main call's resolution local to `prepareRequest`.
     - A second lookup (`getApiKeyAndHeaders`) is a new resolution: it can differ, and it can refresh an OAuth token.
     - An explicit key does not pin the send either, because header-only credentials and the endpoint are resolved
       again (`model-runtime.js:465-471`).
     - The re-review reproduced both (§12).
-  - *Why this is not a weaker tier.*
-    - If the credential is unchanged, which is the normal case, the aside reads P's cache.
-    - If it changed, the main session's next request misses P's cache too, and the aside writes the entry that
-      request will read.
-    - T1 would use the same credential and carry less, so it is never better.
+  - *What T0 promises.* T0 promises checked content fidelity: the model sees what the main session's model sees,
+    and the request is the only one that can read P's cache. It does not promise a cost:
+    - with an unchanged credential, which is the normal case, it reads P's cache;
+    - after a credential change it writes instead. That write can serve the main session's next request only if
+      that request keeps the same model, credential and prefix. T1 can then be cheaper, for example when a
+      handler made P much larger than the branch, but it answers over different context.
 
-    Credential identity therefore never decides the tier. The panel reports the read (A5).
-- *Headers.* The final map is `F ⊕ X`, in the order Pi uses (`sdk.js:204`, `provider-attribution.js:60`):
-  - X is what Pi's resolution produces for the aside: auth and configured headers, as passed to the aside's
-    `transformHeaders`.
-  - F is the observed map restricted to the names of Pi's session and attribution headers: `x-opencode-session`,
-    `x-opencode-client`, `HTTP-Referer`, `X-OpenRouter-Title`, `X-OpenRouter-Categories`,
-    `X-BILLING-INVOKE-ORIGIN` and `User-Agent`. None of them carries a secret. The table is copied from each
-    supported build's `provider-attribution.js`, and CI checks it per build.
-  - No other observed name is carried. It came from an earlier auth resolution or from a handler, and the two cannot
-    be told apart, so carrying it could send a stale credential to a new endpoint. Its name, never its value, goes
-    into the note and the panel (`headers not carried: …`), and the hit is then unproven.
+    Credential identity therefore does not decide the tier. The panel reports the read and the write (A5).
+- *Headers.* The final map is `D ⊕ X`, in the order Pi uses (`sdk.js:204`, `provider-attribution.js:60`):
+  - X is what Pi's resolution produces for the aside: auth and the current model's configured headers, as passed to
+    the aside's `transformHeaders`.
+  - D is Pi's session and attribution defaults, *synthesized*, never copied: a replica of
+    `mergeProviderAttributionHeaders`' defaults, computed from the current model object, the frozen session id and
+    the current telemetry policy (`PI_TELEMETRY` if set, otherwise `pi.getSettings().enableInstallTelemetry` with
+    the build's default, `telemetry.js`). Its names are `x-opencode-session`, `x-opencode-client`, `HTTP-Referer`,
+    `X-OpenRouter-Title`, `X-OpenRouter-Categories`, `X-BILLING-INVOKE-ORIGIN` and `User-Agent`, and its values are
+    constants or the session id. `provider-attribution.js` and `telemetry.js` are byte-identical in 1.1.0, 1.2.0 and
+    1.3.0. CI pins their hashes per supported build, so a change in Pi fails CI rather than the replica.
+  - No observed header value is sent. An observed name outside `D ⊕ X` came from an earlier resolution, from earlier
+    configuration or from a handler, and these cannot be told apart. Its name, never its value, goes into the note
+    and the panel (`headers not carried: …`), and the hit is then unproven.
   - Provider-derived headers and SDK-generated auth are added by pi-ai after `transformHeaders`, from the full fork
     context. For example, Copilot's vision header sees the images in T.
 
@@ -385,7 +399,8 @@ T1 exists so that `/aside` always answers. It costs what other packages cost, an
 ### pi-zip
 - pi-zip's handlers never see an aside, so its state cannot change through hooks.
 - P carries pi-zip's sticky `metadata.user_id`. C1 accepts it as a handler change to a field the recipe does not
-  control, so the aside routes to the same account.
+  control. A relay that routes by it therefore routes the aside as it routed P, as long as the credential and
+  model are unchanged (§4.2).
 - **Known effect.** An aside's read refreshes the main cache. pi-zip's clock (`cache.ts:93-101`) counts messages
   and `cache_warm` usage entries only, so after an aside it may think the cache expired and fold, rewriting a
   prefix that was in fact warm.
@@ -430,8 +445,10 @@ state:
   - a second `context_with_system` handler of the same extension asserts that the transcript reaching conversion
     equals the recorded fork;
   - its `before_provider_request` applies the recorded ΔH. It has no `before_provider_headers` handler.
-- The recipe is R.
+- The recipe is R, with the model object current in the scratch agent's registry.
 - O is the request it sends.
+- Pi catches handler exceptions and reports them through `emitError` (`runner.js:1052`). The harness therefore
+  fails on any extension error event, so a failed self-check cannot pass silently.
 
 O shares pi-ai with pi-aside, but none of pi-aside's code. A second oracle, O_real, is the true next main request
 (the question sent as a real next user message on a scratch copy of the session). O_real is compared only in
@@ -442,8 +459,8 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
 | ID | Invariant | How it is checked |
 |---|---|---|
 | I1 | T0 content: the aside equals O, notice excepted, and equals O_real where O_real applies; its stripped core extends P's; every top-level field equals P's | Recorded bodies, for each API |
-| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), provider-derived headers as O's. No observed header outside F reaches the wire | Recorded requests. Includes: image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`. The aside follows the new credential and endpoint, and the old bearer never reaches the capture server. A handler-added header is not carried and is named in the note |
-| I3 | No hooks, no direct writes. (a) A spy extension counts zero hook calls caused by asides. (b) With pi-aside's `pi` and `ctx` proxied, the only write-capable calls are one `appendUsage("aside", …)` per aside request and, on Ctrl+S, one `sendMessage`; the source contains no other write call. (c) Controlled equality: the main session's entries (aside entries removed, parents re-linked) and its later requests are byte-identical to a run without asides, when the capture server's main responses, usage included, do not depend on asides and only extensions that do not read usage entries are loaded | Scripted runs with and without asides. (a) and (b) are also asserted with pi-zip 0.4.11 and 0.4.12 installed. (c) is asserted neither with pi-zip nor against a real provider. A real aside changes the usage that later main messages persist (`session-manager.js:827`), and pi-zip's survival estimate and fold entries follow from it (`run.ts:1480`). With pi-zip, the harness reports entry and request differences next to pi-zip's fold decisions |
+| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), provider-derived headers as O's. No observed header value reaches the wire | Recorded requests. Includes: image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider (the new key never reaches the old URL); a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). The aside follows the new configuration, credential and endpoint, and no old value reaches the capture server. A handler-added header is not carried and is named in the note |
+| I3 | No hooks, no direct writes. (a) A spy extension counts zero hook calls caused by asides. (b) Direct writes, scoped to the main session's conversation and persistent state: with pi-aside's `pi` and `ctx` proxied recursively, nested state APIs such as `ctx.sessionManager` included, the only such mutations are one `appendUsage("aside", …)` per aside request and, on Ctrl+S, one `sendMessage`. UI calls are not state. Pi's own credential persistence after an OAuth refresh inside `streamSimple` is Pi's behaviour, which the main session's next request would cause too, and is outside (b). A manual source audit backs the proxy. This is a bounded check, not a proof against every transitive write. (c) Controlled equality, Ctrl+S excluded: the main session's entries (aside entries removed, parents re-linked) and its later requests are byte-identical to a run without asides, once generated entry ids and timestamps are normalised. It applies when the capture server's main responses, usage included, do not depend on asides and only extensions that do not read usage entries are loaded | Scripted runs with and without asides. (a) and (b) are also asserted with pi-zip 0.4.11 and 0.4.12 installed. (c) is asserted neither with pi-zip nor against a real provider. A real aside changes the usage that later main messages persist (`session-manager.js:827`), and pi-zip's survival estimate and fold entries follow from it (`run.ts:1480`). With pi-zip, the harness reports entry and request differences next to pi-zip's fold decisions |
 | I4 | At most 4 `cache_control` markers, OAuth included | Bodies |
 | I5 | Only `read`, `grep`, `find` and `ls` execute; a `bash` or `write` call produces an error result and no process or file change | Scripted tool calls |
 | I6 | Exactly one `aside` usage entry per aside request, written only while the main agent is idle; nothing in the model context | Session file. Covers: an aside asked mid-run; a preparation failure without `agent_settled`; manual compaction; a session switch with entries queued |
@@ -469,6 +486,10 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
 - convert G alone and splice it (losing tool declarations, duplicating Responses IDs);
 - drop provider-derived headers;
 - carry the whole observed header map (the old bearer reaches the capture server);
+- copy observed attribution header values instead of synthesising D (the telemetry-off and removed-header fixtures
+  fail);
+- send with the model object frozen at observation (the configured-endpoint fixture sends the new key to the old
+  URL);
 - pass an `apiKey`, a `baseUrl` or an auth header from an earlier resolution (the credential-change fixtures fail);
 - append any entry other than the usage entry (I3(b));
 - use `ctx.model` under a virtual model;
@@ -509,7 +530,8 @@ Repeat once on `sota-gpt`.
    `prepareRequest`, so no extension can bind to it or pin it. Revision 3 tried both, and the re-review gave a
    counterexample for each (§12).
    - Under the next-request rule, the aside uses Pi's resolution at send time.
-   - A change since P shows as a low read in the panel. The write then serves the main session's next request.
+   - A change since P shows as a low read in the panel. The write can serve the main session's next request only if
+     that request keeps the same model, credential and prefix.
    - Dropping K also takes the extra auth lookup off the main request path, with its latency and possible OAuth
      refresh.
 4. **Relay routing.** The same metadata as P, and the same auth and endpoint resolution as the main session's next
@@ -532,7 +554,7 @@ Repeat once on `sota-gpt`.
 
 | Step | Content | Exit |
 |---|---|---|
-| S0 spike | Capture server; a hand-made aside on Pi 1.3.0. Nine checks:<br>S1: consecutive-turn behaviour, reading the main entry, and the last element growing;<br>S2: the dry conversion sends no inference request;<br>S3: s2a routing, live, a few cents;<br>S4: the `openai-responses` cache key;<br>S5: `pi install` order;<br>S6: on Anthropic, a string user message and the same text as one block read the same cache entry;<br>S7: the aside's URL, auth and carried headers equal the true next main request's for an API key, OAuth and a header-only credential, also after a credential and endpoint change; the header carry table matches the build's `provider-attribution.js`;<br>S8: the H, R+, S sequence per T0 adapter, with the strict-tools fallback giving R, R, S;<br>S9: per T0 adapter, the session id keys no client-side state | Each claim confirmed, or the design changed |
+| S0 spike | Capture server; a hand-made aside on Pi 1.3.0. Nine checks:<br>S1: consecutive-turn behaviour, reading the main entry, and the last element growing;<br>S2: the dry conversion sends no inference request;<br>S3: s2a routing, live, a few cents;<br>S4: the `openai-responses` cache key;<br>S5: `pi install` order;<br>S6: on Anthropic, a string user message and the same text as one block read the same cache entry;<br>S7: the aside's URL, auth and headers equal the true next main request's for an API key, OAuth and a header-only credential, also after a credential change, a configured endpoint change and a telemetry change; the hashes of `provider-attribution.js` and `telemetry.js` match the replica's;<br>S8: the H, R+, S sequence per T0 adapter, with the strict-tools fallback giving R, R, S;<br>S9: per T0 adapter, the session id keys no client-side state | Each claim confirmed, or the design changed |
 | M1 | `observe.ts`, `fork.ts`, `thread.ts`; I1, I2, I4, I6, I7 and I8 on 1.3.0 | Invariants green, mutants killed |
 | M2 | Panel and send back; I3, I5 and I9 with pi-zip installed | Green |
 | M3 | 1.1.0 and 1.2.0 (pinned stacks); comparison run; GPT review | LAND |
@@ -577,8 +599,8 @@ Other points taken from the re-review:
 
 | # | Finding | Resolution |
 |---|---|---|
-| 1 | K is not bound to the main request's credential: `getApiKeyAndHeaders` is a second resolution, possibly with an OAuth refresh | K is removed. Under the next-request rule, the aside uses Pi's resolution at send time, as the main session's next request and Pi's warmer do. Credential identity no longer decides the tier, because T1 would use the same credential and carry less (§4.2, A5, §8.3). I2 has credential-change fixtures |
-| 2 | An explicit key does not pin header-only auth or the endpoint | Nothing is pinned: no `apiKey`, `baseUrl` or auth header is passed. Only Pi's session and attribution headers are carried from the observation. Every other observed name is reported and never sent, so a stale bearer cannot reach a new endpoint (§4.2). I2 has a stale-bearer fixture; two mutants |
+| 1 | K is not bound to the main request's credential: `getApiKeyAndHeaders` is a second resolution, possibly with an OAuth refresh | K is removed. Under the next-request rule, the aside uses Pi's resolution at send time, as the main session's next request and Pi's warmer do. Credential identity no longer decides the tier, because T1 would use the same credential and carry less (§4.2, A5, §8.3). I2 has credential-change fixtures *Refined in rev 5 (§13, items 1 and 3)* |
+| 2 | An explicit key does not pin header-only auth or the endpoint | Nothing is pinned: no `apiKey`, `baseUrl` or auth header is passed. Only Pi's session and attribution headers are carried from the observation. Every other observed name is reported and never sent, so a stale bearer cannot reach a new endpoint (§4.2). I2 has a stale-bearer fixture; two mutants *Refined in rev 5 (§13, item 2): D is synthesised, not carried* |
 | 3 | The oracle's `context` handler duplicates the system state | The oracle returns `T ++ G ++ Q` from `context_with_system` and checks the transcript that reaches conversion (§7) |
 | 4 | I3(b) forbids effects the design permits | I3 is restated (§7): (b) is a direct-write check, by proxy and by a source scan. Entry and request equality move to (c), which is asserted only where main responses do not depend on asides and no extension reads usage. With pi-zip and in live runs, differences are reported |
 
@@ -586,3 +608,15 @@ Other points taken from the second re-review:
 - `waitForIdle` is kept from the `/aside` command context (§4.6).
 - The checks it confirmed stand unchanged: the warmer does not starve T0, the readiness events on all three T0 APIs,
   the trailing E split, and explicit scalar keys.
+
+## 13. Third re-review resolutions (revision 5)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | The frozen model object can send the fresh key to the old configured endpoint | R freezes the model's identity only. The model object is looked up in the registry at aside time, and both conversions use it, so C1 proves the payload still matches P (§4.1, §4.2). I2 has a configured-endpoint fixture; one mutant |
+| 2 | Observed attribution values may be configured, handler-set or out of policy | D is synthesised from the current model, the session id and the current telemetry policy, through a replica of Pi's defaults pinned by file hash per build. No observed value is sent (§4.2). I2 has removed-header and telemetry fixtures in both directions; one mutant |
+| 3 | "T1 is never better" is not a valid cost argument | T0 promises checked content fidelity and only measured cache use. The cost claims are qualified, as are the claims that the write serves the next main request and that the relay picks the same account (§4.2, §5, §8.3) |
+| 4 | I3 needs scope and normalisation | (b) is scoped to direct mutations of conversation and persistent state, with a recursive proxy and a manual audit; it is a bounded check. (c) excludes Ctrl+S and normalises entry ids and timestamps (§7) |
+
+Also: the harness fails on any extension error event, because Pi catches handler exceptions (§7).
+
