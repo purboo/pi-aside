@@ -1,6 +1,6 @@
 # pi-aside: design
 
-Status: design, revision 6 (2026-10-20). Nothing is implemented yet.
+Status: design, revision 7 (2026-10-20). Nothing is implemented yet.
 - Revision 2 answers the first GPT design review (`/tmp/aside-design-review.md`, 12 findings); see §10.
 - Revision 3 answers the re-review (7 findings, no P0); see §11. Its rule: **attribution selects a candidate, checks
   prove it**. No guarantee rests on event timing alone.
@@ -10,6 +10,8 @@ Status: design, revision 6 (2026-10-20). Nothing is implemented yet.
   current model object, Pi's auth, and synthesised default headers. T0 promises content fidelity, not a cost.
 - Revision 6 answers the fourth re-review (1 P1, 3 P2); see §14. A currency check in B1's `onPayload` binds the
   fresh credential to the current model object.
+- Revision 7 answers the fifth re-review (1 P1, 1 P2); see §15. B1 takes its model object and Pi takes its
+  provider in one synchronous step, so the endpoint and the credential come from one registry state.
 
 pi-aside answers a side question about the running Pi session, at the cache-read price whenever the main cache is
 still alive and routing is unchanged. The aside request is the
@@ -266,22 +268,36 @@ Why this is enough:
 - *Transport routing*, meaning the endpoint, the credential and the headers, is the main session's next request's.
   It is computed fresh, never copied from the observation, and no observed transport value is sent.
 - *Model.* The physical model's identity (provider, id, API) comes from the observation, never from `ctx.model`, so
-  a virtual model's router is not invoked. The model *object* is looked up in `ctx.modelRegistry` at aside time:
+  a virtual model's router is not invoked. The model *object* is looked up in `ctx.modelRegistry`, separately for
+  each send:
   - Its routing fields (`baseUrl`, configured headers) are therefore current. Configuration can put the endpoint on
     the model (`provider-composer.js:167`), and `prepareRequest` keeps the supplied model's URL unless auth returns
     one (`model-runtime.js:471`).
-  - Both conversions in this section use that object. C1 then proves that it still reproduces P. A configuration
-    change that alters the payload therefore fails C1 and gives T1.
-  - *Currency check.* B1's `onPayload` runs after Pi's auth resolution and before the request goes on the wire.
-    There, the aside compares the object with `ctx.modelRegistry.find(provider, id)`, by deep equality against a
-    snapshot taken at lookup. If they differ, the configuration changed during preparation: Pi may have resolved a
-    new credential while the object still carries the old endpoint (`model-runtime.js:456,471`). B1 is aborted
-    before any byte is sent, and the aside starts again from the lookup and B0. After two restarts it uses T1.
+  - *Same-tick send.* B1's object is looked up with `find(provider, id)` and passed to `streamSimple` in the same
+    synchronous step, with no `await` in between. Pi starts `prepareRequest` synchronously (`lazyStream` runs its
+    setup at once, `lazy.js:36`). `prepareRequest` takes the provider, which later resolves the credential, before
+    its first `await` (`model-runtime.js:452-456`, pi-ai `models.js:336-337`). The object, which carries the
+    endpoint, and the provider therefore come from one registry state, whatever changes later. The same holds on
+    1.1.0 (`model-runtime.js:447-451`, `models.js:334-337`).
+  - *Same recipe.* B1's object must deep-equal the snapshot of B0's object, so both conversions use one recipe.
+    Otherwise the aside starts again from B0. C1 then proves that this recipe still reproduces P, so a
+    configuration change that alters the payload fails C1 and gives T1.
+  - *Currency check.* A defence, not the binding. B1's `onPayload` runs after Pi's auth resolution and before any
+    byte is sent (all three T0 APIs on 1.1.0 and 1.3.0). There, the registry's current object must be the same
+    object (`===`, since Pi recomposes a changed provider into new objects) and deep-equal to the snapshot (to catch
+    in-place mutation). Otherwise B1 aborts, and the aside starts again. After two restarts it uses T1. An abort in
+    `onPayload` ends the stream with an error event; the restart reads the aside's own flag, not the stream result.
+  - *Residual.* Pi reads a model's configured headers after the auth `await` (`model-runtime.js:369-375`). A change
+    from A to B and back to A inside that `await` can pair B's configured headers with A's endpoint. The
+    currency check cannot see it, and Pi's own requests share it. Closing it needs a registry generation from Pi
+    (§8).
+  - Model objects are plain data (all 1,650 bundled models on 1.1.0 and 1,714 on 1.3.0 clone without loss). An
+    object with a function-valued field is compared by identity only.
   - If the registry no longer has the model, the aside uses T1.
 - *Credential and endpoint.* The aside passes no `apiKey`, no `baseUrl` and no auth header. Pi resolves auth once,
   inside the aside's own send (`prepareRequest`, `model-runtime.js:452`), exactly as it will for the main session's
-  next request. Pi's own warmer replays the same way. Auth is resolved once, and the currency check then binds it
-  to the current model object. A configuration written in two separate steps (key, then endpoint) can still be seen
+  next request. Pi's own warmer replays the same way. Auth is resolved once, from the provider taken in the same
+  step as the model object. A configuration written in two separate steps (key, then endpoint) can still be seen
   half-way. That window is the same for every Pi request, the main session's included.
   - *Why not bind to P's credential.* Pi keeps the main call's resolution local to `prepareRequest`.
     - A second lookup (`getApiKeyAndHeaders`) is a new resolution: it can differ, and it can refresh an OAuth token.
@@ -357,7 +373,8 @@ Tool declarations stay exactly as in P, because they are part of the prefix. Whe
 ### 4.5 Follow-ups
 
 A follow-up converts `T ++ G ++ Q ++ A1 ++ Q2` under the same R and checks it against P with C1–C3. Its content
-extends the first aside request, so it reads the fork's own cache entry. `/aside <new question>` always starts a
+extends the first aside request, so it can read the fork's own cache entry: if routing is unchanged and the entry
+is still alive, as in §4.2. `/aside <new question>` always starts a
 new fork from the latest observation.
 
 ### 4.6 Accounting
@@ -476,7 +493,7 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
 | ID | Invariant | How it is checked |
 |---|---|---|
 | I1 | T0 content: the aside equals O, notice excepted, and equals O_real where O_real applies; its stripped core extends P's; every top-level field equals P's | Recorded bodies, for each API |
-| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), provider-derived headers as O's. No observed header value reaches the wire | Recorded requests. Includes: image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider, made both before the aside starts and between B0 and B1, inside the auth resolution (the new key never reaches the old URL; the second case restarts); a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). The aside follows the new configuration, credential and endpoint, and no old value reaches the capture server. A handler-added header is not carried and is named in the note |
+| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), provider-derived headers as O's. No observed header value reaches the wire | Recorded requests. Includes: image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider, made before the aside starts, between B0 and B1, and inside B1's auth resolution, each as a single change A → B and as A → B → A (no key reaches another state's URL); a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). The aside follows the new configuration, credential and endpoint, and no old value reaches the capture server. A handler-added header is not carried and is named in the note |
 | I3 | No hooks, no direct writes. (a) A spy extension counts zero hook calls caused by asides. (b) Direct writes, scoped to the main session's conversation and persistent state: with pi-aside's `pi` and `ctx` proxied recursively, nested state APIs such as `ctx.sessionManager` included, the only such mutations are one `appendUsage("aside", …)` per aside request and, on Ctrl+S, one `sendMessage`. UI calls are not state. Pi's own credential persistence after an OAuth refresh inside `streamSimple` is Pi's behaviour, which the main session's next request would cause too, and is outside (b). A manual source audit backs the proxy. This is a bounded check, not a proof against every transitive write. (c) Controlled equality, Ctrl+S excluded: the main session's entries (aside entries removed, parents re-linked) and its later requests are byte-identical to a run without asides, once generated entry ids and timestamps are normalised. It applies when the capture server's main responses, usage included, do not depend on asides and only extensions that do not read usage entries are loaded | Scripted runs with and without asides. (a) and (b) are also asserted with pi-zip 0.4.11 and 0.4.12 installed. (c) is asserted neither with pi-zip nor against a real provider. A real aside changes the usage that later main messages persist (`session-manager.js:827`), and pi-zip's survival estimate and fold entries follow from it (`run.ts:1480`). With pi-zip, the harness reports entry and request differences next to pi-zip's fold decisions |
 | I4 | At most 4 `cache_control` markers, OAuth included | Bodies |
 | I5 | Only `read`, `grep`, `find` and `ls` execute; a `bash` or `write` call produces an error result and no process or file change | Scripted tool calls |
@@ -507,7 +524,10 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
   fail);
 - send with the model object frozen at observation (the configured-endpoint fixture sends the new key to the old
   URL);
-- skip the currency check (the mid-preparation endpoint fixture sends the new key to the old URL);
+- look B1's model object up before B0 and reuse it (the A → B → A fixture between B0 and B1 sends B's key to A's
+  URL);
+- skip the currency check (the single-change fixture inside auth resolution sends B's configured headers to A's
+  URL);
 - pass an `apiKey`, a `baseUrl` or an auth header from an earlier resolution (the credential-change fixtures fail);
 - append any entry other than the usage entry (I3(b));
 - use `ctx.model` under a virtual model;
@@ -552,6 +572,10 @@ Repeat once on `sota-gpt`.
      that request keeps the same model, credential and prefix.
    - Dropping K also takes the extra auth lookup off the main request path, with its latency and possible OAuth
      refresh.
+   - A configuration change from A to B and back inside the auth `await` can pair B's configured headers with A's
+     endpoint, for the aside and for Pi's own requests alike (§4.2, *Residual*). The upstream ask is a registry
+     generation, or configured headers read before the `await`. pi-aside would feature-detect either and check it in
+     `onPayload`.
 4. **Relay routing.** The same metadata as P, and the same auth and endpoint resolution as the main session's next
    request. S3 measures it on s2a.
 5. **Payload retention.** One observation holds P, T and B0, a few MB at most. It is never written to disk and is
@@ -649,4 +673,11 @@ Also: the harness fails on any extension error event, because Pi catches handler
 
 Also: CI asserts the telemetry default with the file hashes, and D's model input is the pre-substitution registry
 object, as in Pi (`sdk.js:205`).
+
+## 15. Fifth re-review resolutions (revision 7)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | An A → B → A change passes a snapshot check while auth keeps B's provider and the object carries A's endpoint | B1 looks up its model object and calls `streamSimple` in one synchronous step, and Pi takes the provider before its first `await`, so the endpoint and the credential share one registry state. The `onPayload` check stays as a defence and adds identity. The residual (configured headers read after the `await`, shared with Pi's own requests) is stated, and its fix needs a Pi generation (§4.2, §8). I2 runs A → B → A at three points; one mutant |
+| 2 | Follow-ups promised an unconditional hit | Conditional, as in §4.2 (§4.5) |
 
