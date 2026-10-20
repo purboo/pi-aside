@@ -1,6 +1,6 @@
 # pi-aside: design
 
-Status: design, revision 9 (2026-10-20). Nothing is implemented yet.
+Status: design, revision 10 (2026-10-20). Nothing is implemented yet.
 - Revision 2 answers the first GPT design review (`/tmp/aside-design-review.md`, 12 findings); see §10.
 - Revision 3 answers the re-review (7 findings, no P0); see §11. Its rule: **attribution selects a candidate, checks
   prove it**. No guarantee rests on event timing alone.
@@ -8,8 +8,8 @@ Status: design, revision 9 (2026-10-20). Nothing is implemented yet.
   aside uses Pi's auth resolution at send time, as the main session's next request would.
 - Revision 5 answers the third re-review (3 P1, 1 P2); see §13. Routing is computed fresh, never copied: the
   current model object, Pi's auth, and synthesised default headers. T0 promises content fidelity, not a cost.
-- Revision 6 answers the fourth re-review (1 P1, 3 P2); see §14. A currency check in B1's `onPayload` binds the
-  fresh credential to the current model object.
+- Revision 6 answers the fourth re-review (1 P1, 3 P2); see §14. A currency check in B1's `onPayload` checks the
+  fresh credential against the current model object.
 - Revision 7 answers the fifth re-review (1 P1, 1 P2); see §15. B1 takes its model object and Pi takes its
   provider in one synchronous step.
 - Revision 8 answers the sixth re-review (3 P1); see §16. B1 sends a private clone of the model recipe, so the
@@ -18,12 +18,15 @@ Status: design, revision 9 (2026-10-20). Nothing is implemented yet.
 - Revision 9 answers the seventh re-review (2 P1, 1 P2); see §17. There is no parity claim under reverted changes.
   The residual runs through SDK authentication, dispatch and retries. Request options come from the current
   settings, as Pi derives them.
+- Revision 10 answers the eighth re-review (2 P1, 2 P2); see §18. The currency check covers model-visible registry
+  changes and the environment only. Transport claims are limited to the no-concurrent-change case, and I2 asserts
+  named fixtures only. The retained retry cap is documented, and the settings parsing is pinned.
 
 pi-aside answers a side question about the running Pi session, at the cache-read price whenever the main cache is
-still alive and routing is unchanged. The aside request is the
-request the main session would send next if the question were the user's next message. It is computed without
-running any extension hook, and it is sent only after it is checked against the request the main session actually
-sent. The aside never enters the main transcript, and it never runs the main session's extension hooks.
+still alive and routing is unchanged. The aside request's content is the request the main session would send next
+if the question were the user's next message. It is computed without running any extension hook, and it is sent
+only after it is checked against the request the main session actually sent. Its transport (endpoint, credential,
+headers) is resolved by Pi at send time, as for the main session's requests, within the limits of §4.2. The aside never enters the main transcript, and it never runs the main session's extension hooks.
 
 The command is `/aside <question>`. The npm name `pi-aside` was free on 2026-10-20 (registry 404). The only
 `pi-package` with "aside" in its name is `@alexanderbianchi/herdr-aside`, which is a different package.
@@ -95,8 +98,9 @@ surveyed package carries the handler changes over.
   reading of usage entries are reported, not prevented (§5).
 - **A4. Zero parameters.** No settings. Behaviour follows from A1–A3 and from what the provider reports.
 - **A5. Checked, then measured.** An aside is sent at tier T0 only after a local check proves that its content and
-  its body's routing fields extend the observed request. Its credential and endpoint are Pi's at send time, as for
-  the main session's next request (§4.2); no extension can prove them equal to P's. Event order only *selects* the
+  its body's routing fields extend the observed request. Its credential and endpoint are resolved by Pi at send
+  time, by the procedure the main session's next request uses, within §4.2's limits; no extension can prove them
+  equal to P's. Event order only *selects* the
   candidate; the checks decide. Each
   answer shows the provider's cache read against the cacheable prefix the main response reported. Usage numbers
   are observations, never proof.
@@ -271,8 +275,10 @@ Why this is enough:
 **Routing: the next-request rule.** Routing has two parts, handled differently:
 - *Body routing fields*, such as `metadata.user_id` and `prompt_cache_key`, are part of the payload. They are
   replayed from P through ΔH, and C1 checks them.
-- *Transport routing*, meaning the endpoint, the credential and the headers, is the main session's next request's.
-  It is computed fresh, never copied from the observation, and no observed transport value is sent.
+- *Transport routing*, meaning the endpoint, the credential and the headers, is resolved fresh by Pi at the aside's
+  send, by the resolution the main session's next request would use. It is never copied from the observation, and
+  no observed transport value is sent. It equals that next request's when nothing changes concurrently (I2);
+  §4.2's *Residual* lists where it can differ.
 - *Model.* The physical model's identity (provider, id, API) comes from the observation, never from `ctx.model`, so
   a virtual model's router is not invoked. The model *object* is looked up in `ctx.modelRegistry`, separately for
   each send:
@@ -291,7 +297,8 @@ Why this is enough:
   - *Same recipe.* The clone must deep-equal the snapshot of B0's object, so both conversions use one recipe.
     Otherwise the aside starts again from B0. C1 then proves that this recipe still reproduces P, so a
     configuration change that alters the payload fails C1 and gives T1.
-  - *Currency check.* A defence, not the binding. B1's `onPayload` runs after Pi's auth resolution and the SDK
+  - *Currency check.* A defence, not the binding. It detects model-visible registry changes and process-environment
+    differences that are still present at `onPayload`, nothing more. B1's `onPayload` runs after Pi's auth resolution and the SDK
     client's construction, and before any byte is sent (all three T0 APIs on 1.1.0 and 1.3.0). Two conditions must
     hold there:
     - a fresh `find(provider, id)` deep-equals the clone. Object identity is not required: configured endpoints and
@@ -321,19 +328,28 @@ Why this is enough:
         it (`/v1/oauth/token`) after `onPayload`, so token-file rotation and the SDK's token cache are not seen;
       - retries, which dispatch again and can authenticate again.
 
-    The currency check catches a single registry or environment change made before `onPayload`, because the state
-    still differs there. It does not catch a change reverted before `onPayload` (A → B → A), nor anything read
-    after it. Then a header, key or SDK input from one state can reach another state's URL. Pi's own requests have
+    The currency check does not detect three kinds of change:
+    - provider-level configuration the model object does not carry, even as a single change that is never
+      reverted. For example, headers held by the provider's auth (`provider-composer.js:225-247`). Re-registering
+      the provider with header B during B1's auth resolution passes the check: the aside sends A, a fresh resolution
+      gives B;
+    - a change reverted before `onPayload` (A → B → A);
+    - anything read after `onPayload`.
+
+    Then a header, key or SDK input from one state can reach another state's URL. Pi's own requests have
     the same windows, but not necessarily the same outcome. The aside sends a fixed clone, while the main request's
     SDK client reads the registry's mutable object. So under a combined change the two can pair differently. In one
     case, the URL is mutated to B and the environment key is set to B during credential resolution, and both are
-    restored by `onPayload`: the aside sends key B to A, while the main request sends key B to B. pi-aside claims
-    neither parity with Pi nor safety under these schedules. Closing them needs Pi (§8).
+    restored by `onPayload`: the aside sends key B to A, while the main request sends key B to B.
+
+    In short, transport uses Pi's request-time resolution with a private model snapshot. The checks do not prove
+    atomic routing or parity with the next main request. I2 verifies the named fixtures and makes no guarantee for
+    other concurrent changes. Closing these windows needs Pi (§8).
   - The recipe must clone. All 1,650 bundled models on 1.1.0 and 1,714 on 1.3.0 clone without loss. An object that
     `structuredClone` rejects, for example one with a function-valued field, gives T1.
   - If the registry no longer has the model, the aside uses T1.
 - *Credential and endpoint.* The aside passes no `apiKey`, no `baseUrl` and no auth header. Pi resolves auth once,
-  inside the aside's own send (`prepareRequest`, `model-runtime.js:452`), exactly as it will for the main session's
+  inside the aside's own send (`prepareRequest`, `model-runtime.js:452`), by the same procedure as for the main session's
   next request. Pi's own warmer replays the same way. Auth is resolved once, from the provider taken in the same
   step as the model object. A configuration written in two separate steps (key, then endpoint) can still be seen
   half-way. That window is the same for every Pi request, the main session's included.
@@ -369,9 +385,19 @@ Why this is enough:
     - `websocketConnectTimeoutMs`;
     - `maxRetries` and `maxRetryDelayMs` from the provider retry settings.
 
-    CI pins the hash of that function's source and of the settings defaults per build, as for D. Without the
-    options, the aside would send no timeout header on the OpenAI APIs and `600` on Anthropic, where the main
-    request sends `300`.
+    The replica reproduces the settings manager's parsing, validation and defaults: `"disabled"`, numeric strings
+    and flooring included (`parseTimeoutSetting`, `getHttpIdleTimeoutMs`, `getProviderRetrySettings`,
+    `getWebSocketConnectTimeoutMs`, `SETTINGS_DEFAULTS`). CI pins the hashes of that function's source and of these
+    per build, as for D. Without the options, the aside would send no timeout header on the OpenAI APIs and `600`
+    on Anthropic, where the main request sends `300`. The aside passes its own `AbortSignal`, since its lifecycle is
+    its own.
+  - *Retry cap.* The main agent reads `maxRetryDelayMs` once, when it is created (`sdk.js:288`). It forwards that
+    value on every request (`agent.js:314`), where it takes precedence over the settings (`sdk.js:203`). An
+    extension cannot read the retained value. So after a settings change of `retry.provider.maxRetryDelayMs`, the
+    aside, which uses the current settings, and the main session can retry differently. For example, with a
+    retained 1 ms cap, settings at 10 ms and a 5 ms retry delay, the main request gives up and the aside retries.
+    The cap decides only whether and when a failed request is tried again. It changes no payload, header or
+    endpoint.
   - D's model input is the registry object before any auth URL substitution. Pi passes the same `requestModel` to
     the merge (`sdk.js:205`).
   - No observed header value is sent. An observed name outside `D ⊕ X` came from an earlier resolution, from earlier
@@ -541,7 +567,7 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
 | ID | Invariant | How it is checked |
 |---|---|---|
 | I1 | T0 content: the aside equals O, notice excepted, and equals O_real where O_real applies; its stripped core extends P's; every top-level field equals P's | Recorded bodies, for each API |
-| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. URL, credential and every header as O_real's under the next-request rule (§4.2), SDK-generated headers included, provider-derived headers as O's. No observed header value reaches the wire | Recorded requests. Includes: a baseline with no change, where every header of the aside, `X-Stainless-*` included, equals the main session's next request's under default, custom and zero `httpIdleTimeoutMs` and custom retry settings; image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider, made before the aside starts, between B0 and B1, and inside B1's auth resolution, each as a single change A → B and as A → B → A (no key reaches another state's URL); an unchanged configured endpoint and key, which must stay T0 with no restart; the registry's model object mutated in place during B1's preparation, its `baseUrl` set to B and restored to A before `onPayload` (the request goes to the clone's URL); an environment-backed key and an SDK custom-header variable (`OPENAI_CUSTOM_HEADERS`, `ANTHROPIC_CUSTOM_HEADERS`) changed before `onPayload` as A → B (caught, restart). Residual schedules are characterised, not asserted safe. The harness records what the aside and the main session's next request send for: these variables as A → B → A; the combined URL-and-key change reverted by `onPayload`; and a `NO_PROXY` change after `onPayload`. The results go into the report next to §4.2's *Residual*. The guarantee "no key reaches another state's URL" covers every schedule except these; a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). The aside follows the new configuration, credential and endpoint, and no old value reaches the capture server. A handler-added header is not carried and is named in the note |
+| I2 | Routing: `metadata.user_id` / `prompt_cache_key` as P's. With no concurrent change: URL, credential and every header, SDK-generated ones included, as the main session's next request's under the next-request rule (§4.2), and provider-derived headers as O's. No observed header value reaches the wire. Under concurrent changes only the named fixtures below are asserted | Recorded requests. *Asserted:* a baseline with no change, where every header of the aside, `X-Stainless-*` included, equals the main session's next request's under default, custom, zero, `"disabled"` and numeric-string `httpIdleTimeoutMs`, and a provider timeout override; image-in-T with image-free G. Between P and the aside, each of: an API-key change; an OAuth refresh; a header-only bearer replaced by an API key on another `baseUrl`; a configured `baseUrl` and key change on an API-key provider, made before the aside starts or between B0 and B1 as A → B and as A → B → A, and made inside B1's auth resolution as A → B (caught, restart); an unchanged configured endpoint and key, which must stay T0 with no restart; the registry's model object mutated in place during B1's preparation, its `baseUrl` set to B and restored to A before `onPayload` (the request goes to the clone's URL); an environment-backed key and an SDK custom-header variable (`OPENAI_CUSTOM_HEADERS`, `ANTHROPIC_CUSTOM_HEADERS`) changed before `onPayload` as A → B (caught, restart); a configured header removed, including one with an attribution name such as `User-Agent`; telemetry turned off and turned on; a model configuration change that alters the payload (C1 fails, T1). In each, the aside follows the state in force, no key reaches another state's URL, and no old value reaches the capture server. A handler-added header is not carried and is named in the note. *Characterised, not asserted:* the harness records what the aside and the main session's next request send for each residual schedule of §4.2: the configured key and URL, the environment key, the SDK header variables, and the combined URL-and-key change, each changed inside B1's preparation and reverted by `onPayload`; a provider re-registered with another header during B1's auth resolution and never reverted; a `NO_PROXY` change after `onPayload`; an identity-token file rotated after `onPayload`; a retry after a settings change of `maxRetryDelayMs`. The results go into the report next to §4.2's *Residual*. I2 makes no guarantee for other concurrent changes |
 | I3 | No hooks, no direct writes. (a) A spy extension counts zero hook calls caused by asides. (b) Direct writes, scoped to the main session's conversation and persistent state: with pi-aside's `pi` and `ctx` proxied recursively, nested state APIs such as `ctx.sessionManager` included, the only such mutations are one `appendUsage("aside", …)` per aside request and, on Ctrl+S, one `sendMessage`. UI calls are not state. Pi's own credential persistence after an OAuth refresh inside `streamSimple` is Pi's behaviour, which the main session's next request would cause too, and is outside (b). A manual source audit backs the proxy. This is a bounded check, not a proof against every transitive write. (c) Controlled equality, Ctrl+S excluded: the main session's entries (aside entries removed, parents re-linked) and its later requests are byte-identical to a run without asides, once generated entry ids and timestamps are normalised. It applies when the capture server's main responses, usage included, do not depend on asides and only extensions that do not read usage entries are loaded | Scripted runs with and without asides. (a) and (b) are also asserted with pi-zip 0.4.11 and 0.4.12 installed. (c) is asserted neither with pi-zip nor against a real provider. A real aside changes the usage that later main messages persist (`session-manager.js:827`), and pi-zip's survival estimate and fold entries follow from it (`run.ts:1480`). With pi-zip, the harness reports entry and request differences next to pi-zip's fold decisions |
 | I4 | At most 4 `cache_control` markers, OAuth included | Bodies |
 | I5 | Only `read`, `grep`, `find` and `ls` execute; a `bash` or `write` call produces an error result and no process or file change | Scripted tool calls |
@@ -750,3 +776,11 @@ object, as in Pi (`sdk.js:205`).
 | 2 | Routing and auth inputs are read after `onPayload`: `NO_PROXY` per dispatch, Anthropic federation's token file and exchange, retries | The residual extends through dispatch, send-time SDK authentication and retries. §8 explains why neither a registry generation nor an environment snapshot closes it, and asks for request-scoped routing |
 | 3 | Settings-derived request options are missing, so `X-Stainless-Timeout` differs from the main request's | The options are synthesized from the current settings as Pi's `buildRequestOptions` does, with source hashes pinned in CI. I2 adds a baseline parity fixture for every header (§4.2, §7) |
 
+## 18. Eighth re-review resolutions (revision 10)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | A single header-only provider re-registration during B1's auth resolution passes the currency check, since provider headers live outside the model recipe | The check is stated as detecting model-visible registry changes and environment differences only. The case is in the residual and characterised in I2. Header parity is withdrawn for it (§4.2) |
+| 2 | I2's exception list was narrower than §4.2's residual (token files, token caches, dispatcher) | I2 is split into asserted fixtures and characterised schedules, and makes no guarantee for other concurrent changes. §4.2 adopts the reviewer's wording: Pi's request-time resolution with a private model snapshot, no proof of atomic routing or parity. The configured-key A → B → A inside auth resolution, wrongly asserted before, moves to the characterised list |
+| 3 | The main agent retains `maxRetryDelayMs` from its creation and gives it precedence over settings | Documented as a retry-policy difference that changes no payload, header or endpoint, with the reviewer's reproduction and a characterised I2 schedule. The settings parsing and defaults are replicated and pinned in CI (§4.2) |
+| 4 | The introduction, a revision note and the transport-routing rule still promised identity with the next main request | Qualified as content fidelity plus Pi's fresh resolution at send time, equal to the next main request's when nothing changes concurrently, within §4.2's limits |
