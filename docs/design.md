@@ -1,6 +1,6 @@
 # pi-aside: design
 
-Status: design, revision 10 (2026-10-20). Nothing is implemented yet.
+Status: design, revision 11 (2026-10-20). Nothing is implemented yet.
 - Revision 2 answers the first GPT design review (`/tmp/aside-design-review.md`, 12 findings); see §10.
 - Revision 3 answers the re-review (7 findings, no P0); see §11. Its rule: **attribution selects a candidate, checks
   prove it**. No guarantee rests on event timing alone.
@@ -8,8 +8,8 @@ Status: design, revision 10 (2026-10-20). Nothing is implemented yet.
   aside uses Pi's auth resolution at send time, as the main session's next request would.
 - Revision 5 answers the third re-review (3 P1, 1 P2); see §13. Routing is computed fresh, never copied: the
   current model object, Pi's auth, and synthesised default headers. T0 promises content fidelity, not a cost.
-- Revision 6 answers the fourth re-review (1 P1, 3 P2); see §14. A currency check in B1's `onPayload` checks the
-  fresh credential against the current model object.
+- Revision 6 answers the fourth re-review (1 P1, 3 P2); see §14. A currency check in B1's `onPayload` checks that the
+  model snapshot and the process environment remain current.
 - Revision 7 answers the fifth re-review (1 P1, 1 P2); see §15. B1 takes its model object and Pi takes its
   provider in one synchronous step.
 - Revision 8 answers the sixth re-review (3 P1); see §16. B1 sends a private clone of the model recipe, so the
@@ -21,6 +21,8 @@ Status: design, revision 10 (2026-10-20). Nothing is implemented yet.
 - Revision 10 answers the eighth re-review (2 P1, 2 P2); see §18. The currency check covers model-visible registry
   changes and the environment only. Transport claims are limited to the no-concurrent-change case, and I2 asserts
   named fixtures only. The retained retry cap is documented, and the settings parsing is pinned.
+- Revision 11 answers the ninth re-review (2 P2, wording); see §19. S7 is limited to I2's asserted fixtures, and
+  the stronger historical resolution is marked superseded.
 
 pi-aside answers a side question about the running Pi session, at the cache-read price whenever the main cache is
 still alive and routing is unchanged. The aside request's content is the request the main session would send next
@@ -675,7 +677,7 @@ Repeat once on `sota-gpt`.
 
 | Step | Content | Exit |
 |---|---|---|
-| S0 spike | Capture server; a hand-made aside on Pi 1.3.0. Nine checks:<br>S1: consecutive-turn behaviour, reading the main entry, and the last element growing;<br>S2: the dry conversion sends no inference request;<br>S3: s2a routing, live, a few cents;<br>S4: the `openai-responses` cache key;<br>S5: `pi install` order;<br>S6: on Anthropic, a string user message and the same text as one block read the same cache entry;<br>S7: the aside's URL, auth and headers equal the true next main request's for an API key, OAuth and a header-only credential, also after a credential change, a configured endpoint change (before the aside and during its preparation) and a telemetry change; the hashes of `provider-attribution.js` and `telemetry.js` match the replica's;<br>S8: the H, R+, S sequence per T0 adapter, with the strict-tools fallback giving R, R, S;<br>S9: per T0 adapter, the session id keys no client-side state | Each claim confirmed, or the design changed |
+| S0 spike | Capture server; a hand-made aside on Pi 1.3.0. Nine checks:<br>S1: consecutive-turn behaviour, reading the main entry, and the last element growing;<br>S2: the dry conversion sends no inference request;<br>S3: s2a routing, live, a few cents;<br>S4: the `openai-responses` cache key;<br>S5: `pi install` order;<br>S6: on Anthropic, a string user message and the same text as one block read the same cache entry;<br>S7: the aside's URL, auth and headers equal the true next main request's for an API key, OAuth and a header-only credential with no concurrent change, and after each change I2 lists as *asserted* (a credential change, a configured endpoint change before the aside, between B0 and B1, or unreverted inside B1's auth resolution, and a telemetry change); the residual schedules of §4.2 are only recorded; the hashes of `provider-attribution.js` and `telemetry.js` match the replica's;<br>S8: the H, R+, S sequence per T0 adapter, with the strict-tools fallback giving R, R, S;<br>S9: per T0 adapter, the session id keys no client-side state | Each claim confirmed, or the design changed |
 | M1 | `observe.ts`, `fork.ts`, `thread.ts`; I1, I2, I4, I6, I7 and I8 on 1.3.0 | Invariants green, mutants killed |
 | M2 | Panel and send back; I3, I5 and I9 with pi-zip installed | Green |
 | M3 | 1.1.0 and 1.2.0 (pinned stacks); comparison run; GPT review | LAND |
@@ -757,7 +759,7 @@ object, as in Pi (`sdk.js:205`).
 
 | # | Finding | Resolution |
 |---|---|---|
-| 1 | An A → B → A change passes a snapshot check while auth keeps B's provider and the object carries A's endpoint | B1 looks up its model object and calls `streamSimple` in one synchronous step, and Pi takes the provider before its first `await`, so the endpoint and the credential share one registry state. The `onPayload` check stays as a defence and adds identity. The residual (configured headers read after the `await`, shared with Pi's own requests) is stated, and its fix needs a Pi generation (§4.2, §8). I2 runs A → B → A at three points; one mutant |
+| 1 | An A → B → A change passes a snapshot check while auth keeps B's provider and the object carries A's endpoint | B1 looks up its model object and calls `streamSimple` in one synchronous step, and Pi takes the provider before its first `await`, so the endpoint and the credential share one registry state (superseded by §16–§18: this holds for the model recipe and the provider object only, not for inputs read later). The `onPayload` check stays as a defence and adds identity. The residual (configured headers read after the `await`, shared with Pi's own requests) is stated, and its fix needs a Pi generation (§4.2, §8). I2 runs A → B → A at three points; one mutant |
 | 2 | Follow-ups promised an unconditional hit | Conditional, as in §4.2 (§4.5) |
 
 ## 16. Sixth re-review resolutions (revision 8)
@@ -784,3 +786,10 @@ object, as in Pi (`sdk.js:205`).
 | 2 | I2's exception list was narrower than §4.2's residual (token files, token caches, dispatcher) | I2 is split into asserted fixtures and characterised schedules, and makes no guarantee for other concurrent changes. §4.2 adopts the reviewer's wording: Pi's request-time resolution with a private model snapshot, no proof of atomic routing or parity. The configured-key A → B → A inside auth resolution, wrongly asserted before, moves to the characterised list |
 | 3 | The main agent retains `maxRetryDelayMs` from its creation and gives it precedence over settings | Documented as a retry-policy difference that changes no payload, header or endpoint, with the reviewer's reproduction and a characterised I2 schedule. The settings parsing and defaults are replicated and pinned in CI (§4.2) |
 | 4 | The introduction, a revision note and the transport-routing rule still promised identity with the next main request | Qualified as content fidelity plus Pi's fresh resolution at send time, equal to the next main request's when nothing changes concurrently, within §4.2's limits |
+
+## 19. Ninth re-review resolutions (revision 11)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 | S7 required parity after an endpoint change during preparation, beyond §4.2's scope; §14's resolution kept "endpoint and credential share one registry state" | S7 covers the no-change case and I2's asserted fixtures only, and records the residual schedules. The §14 sentence is marked superseded by §16–§18 |
+| 2 | Revision 6's note said the currency check checks the credential | It now says the check confirms that the model snapshot and the process environment remain current |
