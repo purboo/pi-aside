@@ -1,15 +1,10 @@
-// Gate for the `text` node: docs/ux.md §3.1 (question-mark rule, U9), §3.3 (handoff line), §3.4 (route line).
-// Pinned by the plan's closure: a writer cannot change it. Run: bun gates/text.ts
+// docs/ux.md §3.1 (question-mark rule, U9), §3.3 (handoff line), §3.4 (route line).
+import { expect, test } from "bun:test";
 import { endsWithQuestionMark, routeEnter } from "../src/qmark.ts";
 import { parseReply } from "../src/reply.ts";
 
-let pass = 0;
-const failures: string[] = [];
 function check(name: string, actual: unknown, expected: unknown): void {
-	const a = JSON.stringify(actual);
-	const e = JSON.stringify(expected);
-	if (a === e) pass++;
-	else failures.push(`${name}: expected ${e}, got ${a}`);
+	test(name, () => expect(actual).toEqual(expected));
 }
 
 // --- endsWithQuestionMark (U9) ---
@@ -103,7 +98,3 @@ const p: Array<[string, boolean, R]> = [
 ];
 const norm = (x: R) => ({ route: x.route ?? null, body: x.body, handoff: x.handoff ?? null });
 for (const [raw, done, want] of p) check(`parseReply(${JSON.stringify(raw)}, ${done})`, norm(parseReply(raw, done)), norm(want));
-
-for (const f of failures) console.log(`FAIL ${f}`);
-console.log(`text gate: ${pass} passed, ${failures.length} failed`);
-process.exit(failures.length === 0 ? 0 : 1);
