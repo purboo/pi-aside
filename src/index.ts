@@ -10,6 +10,7 @@ import { MONEY_THRESHOLD, type PanelState, Reader, type ReaderTurn, renderBelow,
 import { endsWithQuestionMark, routeEnter } from "./qmark.ts";
 import { parseReply } from "./reply.ts";
 import { AsideThread, type TurnView } from "./thread.ts";
+import { installFinalPayloadTap } from "./tap.ts";
 import { currentSettings } from "./transport.ts";
 import { UsageQueue } from "./usage.ts";
 
@@ -107,18 +108,15 @@ export default function piAside(pi: ExtensionAPI): void {
 			l.recipe.virtual = false;
 		}
 	});
+	const usageOf = (u: Any) =>
+		u ? { input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0 } : undefined;
 	pi.on("message_update", (event) => {
-		if ((event.message as Any).role === "assistant") observer.assistantUpdate();
+		const message = event.message as Any;
+		if (message.role === "assistant") observer.assistantUpdate(usageOf(message.usage));
 	});
 	pi.on("message_end", (event) => {
 		const message = event.message as Any;
-		if (message.role === "assistant") {
-			const u = message.usage;
-			observer.assistantEnd(
-				u ? { input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0 } : undefined,
-				message.stopReason,
-			);
-		}
+		if (message.role === "assistant") observer.assistantEnd(usageOf(message.usage), message.stopReason);
 		return undefined;
 	});
 	pi.on("agent_start", () => refreshBelow());
@@ -158,6 +156,7 @@ export default function piAside(pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		resetSession(ctx);
+		installFinalPayloadTap(ctx.modelRegistry, (payload) => observer.finalPayload(payload));
 		installTui(ctx);
 	});
 	pi.on("session_before_switch", () => {
@@ -211,7 +210,8 @@ export default function piAside(pi: ExtensionAPI): void {
 
 	/** The user is sending something to the agent: collapse the panel and attach an accepted handoff's side note. */
 	function collapseAndContinue(text: string): { action: "continue" } {
-		if (panel.turns.length > 0 && !panel.collapsed) {
+		// An answer still streaming stays visible: the user is waiting for it.
+		if (panel.turns.length > 0 && !panel.collapsed && !thread?.busy) {
 			panel.collapsed = true;
 			renderNow();
 		}

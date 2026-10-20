@@ -214,7 +214,38 @@ describe("tool rounds", () => {
 	}, 60_000);
 });
 
+describe("packaging", () => {
+	test("loads as an installed package (settings.packages), after the packages installed before it", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, api: "anthropic", extensions: [PROBE], settings: { packages: [ROOT] } });
+		server.enqueue({ text: "Hello.", usage: { input: 40, cacheWrite: 800 } });
+		await pi.prompt("hello");
+		await pi.waitForAgentEnd(1);
+		server.enqueue({ text: "route: side\nPackaged answer.", usage: { input: 10, cacheRead: 800 } });
+		await pi.prompt("/aside does it load?");
+		const done = await asideDone(pi);
+		expect(done.tier).toBe("exact");
+		expect(done.answer).toBe("Packaged answer.");
+	}, 60_000);
+});
+
 describe("handlers and fallbacks", () => {
+	test("a payload replacement by an extension loaded after pi-aside reaches the aside (final-payload tap)", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, api: "anthropic", extensions: [ASIDE, PROBE], env: { PROBE_REPLACE: "1" } });
+		server.enqueue({ text: "Hello.", usage: { input: 40, cacheWrite: 800 } });
+		await pi.prompt("hello");
+		await pi.waitForAgentEnd(1);
+		server.enqueue({ text: "route: side\nAnswer.", usage: { input: 10, cacheRead: 800 } });
+		await pi.prompt("/aside anything?");
+		const done = await asideDone(pi);
+		expect(done.tier).toBe("exact");
+		const [main, aside] = server.requests;
+		expect(main!.body.metadata).toEqual({ user_id: "late-replacement" });
+		expect(aside!.body.metadata).toEqual({ user_id: "late-replacement" });
+		expectExtends("anthropic", aside!.body, main!.body);
+	}, 60_000);
+
 	test("a handler that rewrites the transcript fails C1: rebuilt, fresh session id", async () => {
 		server = await startCaptureServer();
 		pi = await startPi({ baseUrl: server.url, api: "responses", extensions: [PROBE, ASIDE], env: { PROBE_REWRITE: "1" } });

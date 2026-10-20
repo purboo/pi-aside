@@ -17,6 +17,7 @@ import {
 	type Payload,
 	T0_APIS,
 } from "./payload.ts";
+import { OWN_REQUEST } from "./tap.ts";
 import { envSnapshot, envUnchanged, mergeAttributionHeaders, requestOptions } from "./transport.ts";
 import type { SettingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -165,6 +166,7 @@ function baseOptions(env: ForkEnv, fork: Fork, model: Any, signal: AbortSignal |
 		transformHeaders: (headers: Record<string, unknown>) =>
 			mergeAttributionHeaders(model, settings, fork.recipe.sessionId, headers) ?? {},
 		signal,
+		[OWN_REQUEST]: true,
 	};
 }
 

@@ -44,6 +44,8 @@ export class Observation {
 	headerRef: Record<string, unknown> | undefined;
 	headerCount = 0;
 	attempts: unknown[] = [];
+	/** P is the payload the handler chain returned (the tap), not the R event's object. */
+	tapped = false;
 	/** P, cloned on promotion. */
 	payload: Payload | undefined;
 	/** Header names observed on the promoted call (values are never kept). */
@@ -59,9 +61,14 @@ export class Observation {
 		this.recipe = recipe;
 	}
 
-	/** Cacheable prefix the main response reported: cache read plus cache write. */
+	/**
+	 * Cacheable prefix the main response reported: cache read plus cache write. OpenAI APIs report no cache writes
+	 * (the provider caches the prompt itself), so there it is the whole prompt.
+	 */
 	get cacheablePrefix(): number | undefined {
-		return this.usage ? this.usage.cacheRead + this.usage.cacheWrite : undefined;
+		if (!this.usage) return undefined;
+		if (this.recipe.api.startsWith("openai-")) return this.usage.input + this.usage.cacheRead;
+		return this.usage.cacheRead + this.usage.cacheWrite;
 	}
 
 	/** Whether waiting can still change this observation's usability. */
@@ -160,6 +167,14 @@ export class Observer {
 		l.attempts.push(payload);
 	}
 
+	/** The final-payload tap: the payload the handler chain returned for the latest attempt. */
+	finalPayload(payload: unknown): void {
+		const l = this.latest;
+		if (!l || l.closed || l.state !== "open" || l.attempts.length === 0) return;
+		l.attempts[l.attempts.length - 1] = payload;
+		l.tapped = true;
+	}
+
 	/** `after_provider_response`: promotes the latest attempt to P. */
 	response(status: number): void {
 		const l = this.latest;
@@ -195,10 +210,11 @@ export class Observer {
 		if (l && !l.closed && l.state === "open") l.fail("ambiguous", "a cache warmer replay overlapped the request");
 	}
 
-	/** The main assistant message started streaming. */
-	assistantUpdate(): void {
+	/** The main assistant message started streaming. Anthropic reports the prompt's cache counts at the start. */
+	assistantUpdate(usage?: ObservedUsage): void {
 		const l = this.latest;
 		if (!l || l.state !== "promoted" || l.ready) return;
+		if (usage && !l.usage && usage.cacheRead + usage.cacheWrite > 0) l.usage = usage;
 		l.ready = true;
 		this.lastUsable = l;
 		l.changed();
@@ -209,7 +225,7 @@ export class Observer {
 		const l = this.latest;
 		if (!l) return;
 		if (l.state === "promoted") {
-			if (usage && !l.usage) l.usage = usage;
+			if (usage) l.usage = usage;
 			if (!l.ready && stopReason !== "error" && stopReason !== "aborted") {
 				l.ready = true;
 				this.lastUsable = l;
