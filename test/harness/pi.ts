@@ -36,7 +36,7 @@ export function modelsJson(baseUrl: string): unknown {
 				baseUrl,
 				api: PROVIDERS.anthropic.api,
 				apiKey: PROVIDERS.anthropic.key,
-				models: [model(PROVIDERS.anthropic.model, true), model("claude-plain", false), model("claude-effort", true, { supportsMidConvoEffort: true })],
+				models: [model(PROVIDERS.anthropic.model, true), model("claude-plain", false), model("claude-effort", true, { supportsMidConvoEffort: true, forceAdaptiveThinking: true })],
 			},
 			[PROVIDERS.responses.provider]: {
 				baseUrl: `${baseUrl}/v1`,

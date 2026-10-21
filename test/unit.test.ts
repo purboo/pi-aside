@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { BackgroundWork } from "../src/busy.ts";
-import { STILL_RUNNING, withPlaceholders } from "../src/fork.ts";
+import { asideLevel, STILL_RUNNING, withPlaceholders } from "../src/fork.ts";
 import { Observer, type Recipe } from "../src/observe.ts";
-import { moneyLine } from "../src/panel.ts";
+import { HIDE_HINT, moneyLine, panelBody, type PanelState, progressLines, Reader, renderPanel, spinnerFrame as f } from "../src/panel.ts";
 import {
 	applyDelta,
 	checkC1,
@@ -10,6 +10,7 @@ import {
 	checkC3,
 	countMarkers,
 	diffTopLevel,
+	differsOnlyInConfig,
 	extendsList,
 	splitList,
 	strip,
@@ -262,11 +263,128 @@ describe("placeholders, notice, money", () => {
 	});
 
 	test("money appears only when it is news", () => {
-		const base = { question: "q", raw: "", done: true, cost: 0.03, read: 1000, written: 0, tier: "exact" as const };
+		const base = { question: "q", raw: "", done: true, startedAt: 0, cost: 0.03, read: 1000, written: 0, tier: "exact" as const };
 		expect(moneyLine(base)).toBeUndefined();
 		expect(moneyLine({ ...base, cost: 0.77, written: 150_000 })).toBe("main cache had expired · $0.77");
 		expect(moneyLine({ ...base, cost: 0.71, tier: "rebuilt", reason: "a handler changed `tools`" })).toBe(
 			"rebuilt context · $0.71 · a handler changed `tools`",
 		);
+	});
+});
+
+describe("aside effort", () => {
+	const effortModel = { compat: { supportsMidConvoEffort: true } };
+	test("lowered to `low` only on models that take effort changes mid-conversation", () => {
+		expect(asideLevel(effortModel, "xhigh")).toBe("low");
+		expect(asideLevel(effortModel, "high")).toBe("low");
+		expect(asideLevel(effortModel, "low")).toBe("low");
+		expect(asideLevel(effortModel, "minimal")).toBe("minimal");
+		expect(asideLevel(effortModel, undefined)).toBeUndefined();
+		expect(asideLevel({}, "xhigh")).toBe("xhigh");
+		expect(asideLevel({ compat: { supportsMidConvoEffort: false } }, "high")).toBe("high");
+		// A level map without `low` (or mapping it to nothing) keeps the main level.
+		expect(asideLevel({ ...effortModel, thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max" } }, "xhigh")).toBe("xhigh");
+		expect(asideLevel({ ...effortModel, thinkingLevelMap: { low: null, high: "high" } }, "high")).toBe("high");
+		expect(asideLevel({ ...effortModel, thinkingLevelMap: { low: "low", high: "high" } }, "high")).toBe("low");
+	});
+
+	const effort = (level: string) => ({ role: "system", content: [], output_config: { effort: level } });
+	const payload = (level: string, extra: Record<string, unknown> = {}) => ({
+		model: "m",
+		thinking: { type: "adaptive" },
+		output_config: { effort: "high" },
+		messages: [{ role: "user", content: [{ type: "text", text: "hi", cache_control: cc }] }, effort(level)],
+		...extra,
+	});
+
+	test("the dry runs must differ only in the trailing configuration", () => {
+		expect(differsOnlyInConfig(A, payload("low"), payload("xhigh"))).toBe(true);
+		expect(differsOnlyInConfig(A, payload("low", { output_config: { effort: "low" } }), payload("xhigh"))).toBe(false);
+		const moved = payload("low");
+		(moved.messages[0] as { content: unknown[] }).content.push({ type: "text", text: "more" });
+		expect(differsOnlyInConfig(A, moved, payload("xhigh"))).toBe(false);
+	});
+
+	test("C3 takes the aside's own trailing configuration when given", () => {
+		const p = payload("xhigh");
+		const f = payload("low");
+		(f.messages as unknown[]).splice(1, 0, { role: "user", content: [{ type: "text", text: "q?" }] });
+		expect(checkC3(A, f, p).ok).toBe(false);
+		expect(checkC3(A, f, p, [effort("low")]).ok).toBe(true);
+		expect(checkC3(A, f, p, [effort("medium")]).ok).toBe(false);
+	});
+});
+
+describe("panel", () => {
+	const theme = { fg: (_c: string, s: string) => s, bold: (s: string) => s, italic: (s: string) => s };
+	const turn = (over: Record<string, unknown> = {}) => ({
+		question: "why B?",
+		raw: "",
+		done: false,
+		startedAt: 1_000,
+		cost: 0,
+		read: 0,
+		written: 0,
+		...over,
+	});
+	const state = (over: Partial<PanelState> = {}, t: Record<string, unknown> = {}): PanelState => ({
+		turns: [turn(t) as never],
+		collapsed: false,
+		...over,
+	});
+
+	test("before the first words: a spinner and the time, then the model's thinking", () => {
+		const md = (text: string) => text.split("\n");
+		expect(progressLines(turn() as never, 40, theme, md, 1_500)).toEqual([`${f(1_500)} working`]);
+		expect(progressLines(turn() as never, 40, theme, md, 4_200)).toEqual([`${f(4_200)} working · 3s`]);
+		const thinking = progressLines(turn({ thinking: "one\ntwo\nthree\nfour" }) as never, 40, theme, md, 3_000);
+		expect(thinking).toEqual([`${f(3_000)} thinking · 2s`, "  two", "  three", "  four"]);
+		expect(progressLines(turn({ activity: "reading a.ts" }) as never, 40, theme, md, 1_000)).toEqual([`${f(1_000)} reading a.ts`]);
+	});
+
+	test("the frame: spinner in the title while running, `↵ hides` on the lower edge while the editor is empty", () => {
+		const waiting = renderPanel(state({ editorEmpty: true }), 40, theme, undefined, 1_000);
+		expect(waiting[0]).not.toContain(f(1_000));
+		expect(waiting[1]).toContain(`${f(1_000)} working`);
+		expect(waiting.at(-1)).toContain(HIDE_HINT);
+		const running = renderPanel(state({ editorEmpty: true }, { raw: "route: side\nBecause" }), 40, theme, undefined, 1_000);
+		expect(running[0]).toContain(`${f(1_000)} why B?`);
+		expect(running.join("\n")).not.toContain("working");
+		const done = renderPanel(state({ editorEmpty: false }, { done: true, raw: "route: side\nBecause." }), 40, theme, undefined, 1_000);
+		expect(done[0]).not.toContain(f(1_000));
+		expect(done.join("\n")).toContain("Because.");
+		expect(done.at(-1)).not.toContain(HIDE_HINT);
+		for (const line of [...waiting, ...running, ...done]) expect(line.length).toBe(40);
+	});
+
+	test("a long answer: ten lines and `ctrl+o more`; expanded, up to the terminal's room, then `/aside`", () => {
+		const raw = `route: side\n${Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join("\n")}`;
+		const compact = panelBody(state({ moreKey: "ctrl+o" }, { done: true, raw }), 40, theme);
+		expect(compact.length).toBe(11);
+		expect(compact.at(-1)).toBe("… ctrl+o more");
+		const roomy = panelBody(state({ moreKey: "ctrl+o", expanded: true, maxLines: 20 }, { done: true, raw }), 40, theme);
+		expect(roomy).toEqual(Array.from({ length: 15 }, (_, i) => `line ${i + 1}`));
+		const tight = panelBody(state({ moreKey: "ctrl+o", expanded: true, maxLines: 12 }, { done: true, raw }), 40, theme);
+		expect(tight.length).toBe(13);
+		expect(tight.at(-1)).toBe("… /aside to read all");
+	});
+
+	test("the reader opens at the latest question", () => {
+		const turns = Array.from({ length: 3 }, (_, i) => ({
+			question: `question ${i + 1}?`,
+			answer: Array.from({ length: 12 }, (_, j) => `answer ${i + 1}.${j + 1}`).join("\n"),
+			detail: "exact",
+		}));
+		const reader = new Reader(() => turns, theme, () => {}, () => {}, () => 20);
+		const first = reader.render(60);
+		expect(first[1]).toContain("? question 3?");
+		reader.handleInput("\x1b[H");
+		expect(reader.render(60)[1]).toContain("? question 1?");
+	});
+
+	test("collapsed: one line, a spinner while the answer runs; hidden: nothing", () => {
+		expect(renderPanel(state({ collapsed: true }, { done: true }), 40, theme, undefined, 1_000)).toEqual(["▸ why B?"]);
+		expect(renderPanel(state({ collapsed: true }), 40, theme, undefined, 1_000)).toEqual([`${f(1_000)} why B?`]);
+		expect(renderPanel(state({ collapsed: true, hidden: true }), 40, theme, undefined, 1_000)).toEqual([]);
 	});
 });

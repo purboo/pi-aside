@@ -10,15 +10,53 @@ import type { TurnView } from "./thread.ts";
 type Theme = any;
 
 export const PANEL_LINES = 10;
+/** Lines of the model's thinking shown while no answer text has arrived. */
+export const THINKING_LINES = 3;
 export const MONEY_THRESHOLD = 0.25;
 export const HINT = "↵ asks on the side · corrections still reach the agent";
+/** On the panel's lower edge while the editor is empty: Enter there puts the panel away (docs/ux.md §3.2). */
+export const HIDE_HINT = "↵ hides";
+
+/** Pi's own loader frames. */
+export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+export const SPIN_MS = 80;
+
+export function spinnerFrame(now: number): string {
+	return SPINNER[Math.floor(now / SPIN_MS) % SPINNER.length]!;
+}
 
 export interface PanelState {
 	turns: TurnView[];
+	/** One dim line instead of the frame. */
 	collapsed: boolean;
+	/** Not shown at all (`/aside` still rereads the thread). */
+	hidden?: boolean;
+	/** Whether the editor is empty: the lower edge then shows `HIDE_HINT`. */
+	editorEmpty?: boolean;
+	/** Pi's "more" toggle (`app.tools.expand`, ctrl+o) is on: the answer gets up to `maxLines` lines. */
+	expanded?: boolean;
+	/** Lines an expanded answer may take (from the terminal height). */
+	maxLines?: number;
+	/** The key that toggles "more", as Pi shows it (`ctrl+o`). */
+	moreKey?: string;
 	/** Set when the route check sent the text to the agent. */
 	sentToAgent?: { text: string; waiting: boolean };
 }
+
+/** Markdown to terminal lines; `thinking` text is rendered dim and italic. */
+export type MarkdownRenderer = (text: string, width: number, style?: "thinking") => string[];
+
+function wrap(text: string, width: number): string[] {
+	const out: string[] = [];
+	for (const line of text.split("\n")) {
+		if (line === "") out.push("");
+		else out.push(...wrapTextWithAnsi(line, Math.max(10, width)));
+	}
+	return out;
+}
+
+/** Plain wrapping, for tests and when Pi's Markdown component is unavailable. */
+export const plainText: MarkdownRenderer = (text, width) => wrap(text, width);
 
 function formatCost(cost: number): string {
 	return `$${cost.toFixed(2)}`;
@@ -32,17 +70,37 @@ export function moneyLine(turn: TurnView): string | undefined {
 	return undefined;
 }
 
-function wrap(text: string, width: number): string[] {
-	const out: string[] = [];
-	for (const line of text.split("\n")) {
-		if (line === "") out.push("");
-		else out.push(...wrapTextWithAnsi(line, Math.max(10, width)));
+function elapsed(turn: TurnView, now: number): string {
+	const seconds = Math.floor((now - turn.startedAt) / 1000);
+	return seconds >= 1 ? ` · ${seconds}s` : "";
+}
+
+/** The end of a long thinking text, cut at a paragraph or line start so that its Markdown stays whole. */
+function thinkingTail(text: string): string {
+	const trimmed = text.trimEnd();
+	if (trimmed.length <= 600) return trimmed;
+	const tail = trimmed.slice(-600);
+	const cut = tail.indexOf("\n");
+	return cut >= 0 && cut < tail.length - 1 ? tail.slice(cut + 1) : tail;
+}
+
+/**
+ * The live line of an answer in progress: a spinner, what is happening and for how long, and while the model thinks,
+ * the last lines of its thinking. Shown until the answer's first words, and during a tool call.
+ */
+export function progressLines(turn: TurnView, width: number, theme: Theme, md: MarkdownRenderer, now: number): string[] {
+	const spin = theme.fg("accent", spinnerFrame(now));
+	const dim = (s: string) => theme.fg("dim", s);
+	if (turn.activity) return [`${spin} ${dim(`${turn.activity}${elapsed(turn, now)}`)}`];
+	if (turn.thinking?.trim()) {
+		const tail = md(thinkingTail(turn.thinking), Math.max(10, width - 2), "thinking").filter((line) => line.trim() !== "");
+		return [`${spin} ${dim(`thinking${elapsed(turn, now)}`)}`, ...tail.slice(-THINKING_LINES).map((line) => `  ${line}`)];
 	}
-	return out;
+	return [`${spin} ${dim(`working${elapsed(turn, now)}`)}`];
 }
 
 /** Body lines of the panel for its current state (without the frame). */
-export function panelBody(state: PanelState, width: number, theme: Theme): string[] {
+export function panelBody(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): string[] {
 	const turn = state.turns.at(-1);
 	if (!turn) return [];
 	const dim = (s: string) => theme.fg("dim", s);
@@ -51,15 +109,16 @@ export function panelBody(state: PanelState, width: number, theme: Theme): strin
 	}
 	const lines: string[] = [];
 	const parsed = parseReply(turn.raw, turn.done);
-	const body = wrap(parsed.body, width);
+	const body = parsed.body ? md(parsed.body, width) : [];
+	const limit = state.expanded ? Math.max(PANEL_LINES, state.maxLines ?? PANEL_LINES) : PANEL_LINES;
 	if (!turn.done) {
-		lines.push(...body.slice(-PANEL_LINES));
-		if (turn.activity) lines.push(dim(turn.activity));
-		else if (body.length === 0) lines.push(dim("…"));
+		lines.push(...body.slice(-limit));
+		if (turn.activity || body.length === 0) lines.push(...progressLines(turn, width, theme, md, now));
 	} else {
-		if (body.length > PANEL_LINES) {
-			lines.push(...body.slice(0, PANEL_LINES));
-			lines.push(dim("… /aside to read all"));
+		if (body.length > limit) {
+			lines.push(...body.slice(0, limit));
+			const more = !state.expanded && state.moreKey ? `${state.moreKey} more` : "/aside to read all";
+			lines.push(dim(`… ${more}`));
 		} else {
 			lines.push(...body);
 		}
@@ -71,21 +130,37 @@ export function panelBody(state: PanelState, width: number, theme: Theme): strin
 	return lines;
 }
 
-/** The framed panel (rounded box with the question as title), or one dim line when collapsed. */
-export function renderPanel(state: PanelState, width: number, theme: Theme): string[] {
+/**
+ * The framed panel (rounded box with the question as its title, a spinner before it while the answer streams, and
+ * `↵ hides` on the lower edge while the editor is empty), one dim line when collapsed, nothing when hidden.
+ */
+export function renderPanel(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): string[] {
 	const turn = state.turns.at(-1);
-	if (!turn) return [];
+	if (!turn || state.hidden) return [];
 	const border = (s: string) => theme.fg("borderMuted", s);
-	if (state.collapsed) return [truncateToWidth(theme.fg("dim", `▸ ${turn.question.replace(/\s+/g, " ")}`), width)];
+	const question = turn.question.replace(/\s+/g, " ");
+	const running = !turn.done && !state.sentToAgent;
+	if (state.collapsed) {
+		const mark = running ? theme.fg("accent", spinnerFrame(now)) : theme.fg("dim", "▸");
+		return [truncateToWidth(`${mark} ${theme.fg("dim", question)}`, width)];
+	}
 	const inner = Math.max(10, width - 4);
-	const title = truncateToWidth(` ${turn.question.replace(/\s+/g, " ")} `, Math.max(4, width - 6), "…");
+	// The spinner sits in the title while the answer streams, and on the progress line before it (never both).
+	const progress = !!turn.activity || parseReply(turn.raw, turn.done).body === "";
+	const spin = running && !progress ? `${spinnerFrame(now)} ` : "";
+	const title = truncateToWidth(` ${spin}${question} `, Math.max(4, width - 6), "…");
 	const top = border("╭─") + theme.fg("muted", title) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(title)))}╮`);
 	const out = [truncateToWidth(top, width)];
-	for (const line of panelBody(state, inner, theme)) {
-		const text = truncateToWidth(line, inner);
+	for (const line of panelBody(state, inner, theme, md, now)) {
+		const text = truncateToWidth(line.replace(/\s+$/u, ""), inner);
 		out.push(`${border("│")} ${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))} ${border("│")}`);
 	}
-	out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	const hint = state.editorEmpty ? ` ${HIDE_HINT} ` : "";
+	if (hint && width >= visibleWidth(hint) + 6) {
+		out.push(border(`╰${"─".repeat(Math.max(0, width - 3 - visibleWidth(hint)))}`) + theme.fg("dim", hint) + border("─╯"));
+	} else {
+		out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	}
 	return out;
 }
 
@@ -103,7 +178,7 @@ export interface ReaderTurn {
 	detail: string;
 }
 
-/** The `/aside` reader: every question and answer of the latest thread, scrollable; Esc closes. */
+/** The `/aside` reader: every question and answer of the latest thread, opened at the latest question; Esc closes. */
 export class Reader {
 	private offset = 0;
 	private lastHeight = 20;
@@ -114,15 +189,21 @@ export class Reader {
 		private readonly done: () => void,
 		private readonly requestRender: () => void,
 		private readonly rows: () => number,
+		private readonly md: MarkdownRenderer = plainText,
 	) {}
+
+	/** Where the latest question starts: the reader opens there, like a conversation opens at its end. */
+	private latestStart = 0;
+	private opened = false;
 
 	private lines(width: number): string[] {
 		const out: string[] = [];
 		const inner = Math.max(10, width - 2);
 		for (const turn of this.turns()) {
+			this.latestStart = out.length;
 			out.push(...wrap(this.theme.fg("accent", `? ${turn.question}`), inner));
 			out.push("");
-			out.push(...wrap(turn.answer, inner));
+			out.push(...this.md(turn.answer, inner).map((line) => line.replace(/\s+$/u, "")));
 			out.push(...wrap(this.theme.fg("dim", turn.detail), inner));
 			out.push("");
 		}
@@ -132,8 +213,12 @@ export class Reader {
 	render(width: number): string[] {
 		const height = Math.max(5, Math.floor(this.rows() * 0.8) - 2);
 		this.lastHeight = height;
-		const all = this.lines(width);
+		const all = this.lines(width - 2);
 		const max = Math.max(0, all.length - height);
+		if (!this.opened) {
+			this.opened = true;
+			this.offset = this.latestStart;
+		}
 		if (this.offset > max) this.offset = max;
 		const view = all.slice(this.offset, this.offset + height);
 		const border = (s: string) => this.theme.fg("borderMuted", s);

@@ -227,6 +227,126 @@ describe("TUI", () => {
 		expect(tui.screen()).not.toMatch(/↵ asks on the side/);
 	}, 60_000);
 
+	test("before its first words the panel shows a spinner and the time, then the model's thinking; Markdown renders", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		const hold = deferred();
+		const holdText = deferred();
+		server.enqueue({
+			hold: hold.promise,
+			thinking: "**Comparing** the two approaches carefully.",
+			holdText: holdText.promise,
+			text: "route: side\n**Because** B touches `fewer` callers.\n\n- first reason\n- second reason",
+			usage: { input: 10, cacheRead: 900 },
+		});
+		tui.type("/aside why B?");
+		tui.key("Enter");
+		await tui.waitForScreen(/[\u2800-\u28ff] working/);
+		await tui.waitForScreen(/working · [1-9]s/);
+		hold.resolve();
+		await tui.waitForScreen(/[\u2800-\u28ff] thinking/);
+		const thinking = await tui.waitForScreen(/Comparing the two approaches carefully\./);
+		expect(thinking).not.toContain("**Comparing**");
+		holdText.resolve();
+		const screen = await tui.waitForScreen(/Because B touches fewer callers\./);
+		expect(screen).not.toContain("**Because**");
+		expect(screen).not.toContain("`fewer`");
+		expect(screen).toMatch(/first reason/);
+		expect(screen).not.toMatch(/thinking|working|Comparing/);
+	}, 60_000);
+
+	test("Enter on an empty editor puts the panel away: the frame, then its one line; /aside still rereads it", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		server.enqueue({ text: "route: side\nThe side answer.", usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside what happened?");
+		tui.key("Enter");
+		await tui.waitForScreen(/The side answer\./);
+		await tui.waitForScreen(/─ ↵ hides ─╯/);
+		// Typing takes the hint away: Enter would send the text.
+		tui.type("x");
+		await sleep(300);
+		expect(tui.screen()).not.toMatch(/↵ hides/);
+		tui.key("BSpace");
+		await tui.waitForScreen(/↵ hides/);
+		const requests = server.requests.length;
+		tui.key("Enter");
+		await tui.waitForScreen(/▸ what happened\?/);
+		expect(tui.screen()).not.toMatch(/The side answer\./);
+		tui.key("Enter");
+		for (let i = 0; i < 50 && /▸ what happened\?/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/what happened\?/);
+		await sleep(500);
+		expect(server.requests.length).toBe(requests);
+		tui.type("/aside");
+		tui.key("Enter");
+		await tui.waitForScreen(/esc close/);
+		expect(tui.screen()).toMatch(/The side answer\./);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /esc close/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/esc close/);
+	}, 60_000);
+
+	test("ctrl+o (Pi's `more`) expands a long answer and reopens a collapsed panel", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		const lines = Array.from({ length: 9 }, (_, i) => `point number ${i + 1}`).join("\n\n");
+		server.enqueue({ text: `route: side\n${lines}`, usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside list the points");
+		tui.key("Enter");
+		await tui.waitForScreen(/\u2026 ctrl\+o more/);
+		expect(tui.screen()).not.toMatch(/point number 9/);
+		tui.key("C-o");
+		await tui.waitForScreen(/point number 9/);
+		expect(tui.screen()).not.toMatch(/ctrl\+o more/);
+		tui.key("Enter");
+		await tui.waitForScreen(/\u25b8 list the points/);
+		tui.key("C-o");
+		await tui.waitForScreen(/point number 9/);
+		tui.key("C-o");
+		await tui.waitForScreen(/\u2026 ctrl\+o more/);
+	}, 60_000);
+
+	test("the reader opens at the latest question; long CJK Markdown lines wrap inside its frame", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		const long = Array.from({ length: 30 }, (_, i) => `\u7b2c ${i + 1} \u884c`).join("\n\n");
+		server.enqueue({ text: `route: side\n${long}`, usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside first?");
+		tui.key("Enter");
+		await tui.waitForScreen(/\u2026 ctrl\+o more/);
+		const cjk =
+			"1. **\u5386\u53f2\u6570\u636e\u4e0d\u518d\u7b97\u9a8c\u8bc1**\uff1a\u5df2\u5b8c\u6210\u5e76\u5408\u5165 trunk\uff08`1fe6175`\uff0cledger #294\uff09\u3002" +
+			"\u8fd9\u662f\u4e00\u6bb5\u5f88\u957f\u7684\u4e2d\u6587\u53e5\u5b50".repeat(12) +
+			"END";
+		server.enqueue({ text: `route: side\n${cjk}`, usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside second?");
+		tui.key("Enter");
+		await tui.waitForScreen(/END/);
+		tui.type("/aside");
+		tui.key("Enter");
+		const screen = await tui.waitForScreen(/esc close/);
+		expect(screen).toMatch(/\? second\?/);
+		expect(screen).toMatch(/END/);
+		expect(screen).not.toMatch(/\? first\?/);
+		expect(screen).not.toContain("**");
+		const framed = screen.split("\n").filter((line) => line.startsWith("\u2502"));
+		for (const line of framed) expect(line).not.toMatch(/\.\.\.\s*\u2502$|\u2026\s*\u2502$/);
+		tui.key("Escape");
+	}, 60_000);
+
 	test("an aside that fails before its route line sends the text as a steer", async () => {
 		const { server, tui } = await start();
 		server.enqueue(

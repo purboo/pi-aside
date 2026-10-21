@@ -1,12 +1,23 @@
 // pi-aside: ask a side question about a running Pi session without touching it, at the cache-read price.
 // Engine: docs/design.md. Interaction: docs/ux.md.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { getKeybindings } from "@earendil-works/pi-tui";
+import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, keyText } from "@earendil-works/pi-coding-agent";
+import { getKeybindings, Markdown } from "@earendil-works/pi-tui";
 import { BackgroundWork } from "./busy.ts";
 import type { ForkEnv } from "./fork.ts";
 import { Observer, type Recipe } from "./observe.ts";
-import { MONEY_THRESHOLD, type PanelState, Reader, type ReaderTurn, renderBelow, renderPanel } from "./panel.ts";
+import {
+	type MarkdownRenderer,
+	MONEY_THRESHOLD,
+	PANEL_LINES,
+	type PanelState,
+	plainText,
+	Reader,
+	type ReaderTurn,
+	renderBelow,
+	renderPanel,
+	SPIN_MS,
+} from "./panel.ts";
 import { endsWithQuestionMark, routeEnter } from "./qmark.ts";
 import { parseReply } from "./reply.ts";
 import { AsideThread, type TurnView } from "./thread.ts";
@@ -23,6 +34,28 @@ const STATUS_KEY = "pi-aside";
 const SIDE_NOTE_TYPE = "aside";
 const REBUILT_NOTICE_AFTER = 3;
 
+/** Pi's Markdown component with Pi's Markdown theme; the last few renders are kept (the spinner redraws often). */
+function markdownRenderer(theme: Any): MarkdownRenderer {
+	const cache = new Map<string, string[]>();
+	return (text, width, style) => {
+		const key = `${style ?? ""}|${width}|${text}`;
+		const hit = cache.get(key);
+		if (hit) return hit;
+		let lines: string[];
+		try {
+			const textStyle = style === "thinking" ? { color: (s: string) => theme.fg("dim", s), italic: true } : undefined;
+			lines = new Markdown(text, 0, 0, getMarkdownTheme(), textStyle).render(Math.max(10, width)).map((line) => line.replace(/\s+$/u, ""));
+			while (lines.length > 0 && lines.at(-1) === "") lines.pop();
+			while (lines.length > 0 && lines[0] === "") lines.shift();
+		} catch {
+			lines = plainText(text, width);
+		}
+		if (cache.size >= 8) cache.delete(cache.keys().next().value!);
+		cache.set(key, lines);
+		return lines;
+	};
+}
+
 export default function piAside(pi: ExtensionAPI): void {
 	const observer = new Observer();
 	let ctxRef: ExtensionContext | undefined;
@@ -36,6 +69,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	let rebuiltInARow = 0;
 	let rebuiltNoticeShown = false;
 	let unsubscribeInput: (() => void) | undefined;
+	let ticker: ReturnType<typeof setInterval> | undefined;
 
 	const usage = new UsageQueue({
 		state: () => (ctxRef ? { idle: ctxRef.isIdle(), sessionId: ctxRef.sessionManager.getSessionId() } : undefined),
@@ -131,7 +165,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	function resetSession(ctx: ExtensionContext | undefined): void {
 		thread?.abort();
 		thread = undefined;
-		panel = { turns: [], collapsed: false };
+		panel = { turns: [], collapsed: false, expanded: panel.expanded };
 		handoff = undefined;
 		acceptedHandoff = undefined;
 		rebuiltInARow = 0;
@@ -263,7 +297,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (!continuing) {
 			thread?.abort();
 			thread = new AsideThread(threadHost());
-			panel = { turns: thread.turns, collapsed: false };
+			panel = { turns: thread.turns, collapsed: false, expanded: panel.expanded };
 		} else if (thread!.busy) {
 			thread!.abort();
 		}
@@ -271,6 +305,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		handoff = undefined;
 		acceptedHandoff = undefined;
 		panel.collapsed = false;
+		panel.hidden = false;
 		panel.sentToAgent = undefined;
 		showPanel(true);
 		refreshBelow();
@@ -338,6 +373,7 @@ export default function piAside(pi: ExtensionAPI): void {
 			parts.push(`rebuilt: not expected to hit${turn.reason ? ` (${turn.reason})` : ""}`);
 			parts.push(`read ${fmt(turn.read)}, wrote ${fmt(turn.written)}`);
 		}
+		if (turn.effort) parts.push(`thinking ${turn.effort}`);
 		parts.push(`$${turn.cost.toFixed(turn.cost < MONEY_THRESHOLD ? 3 : 2)}`);
 		return parts.join(" · ");
 	}
@@ -351,6 +387,9 @@ export default function piAside(pi: ExtensionAPI): void {
 			read: turn.read,
 			written: turn.written,
 			predicted: turn.predicted,
+			effort: turn.effort,
+			firstTextMs: turn.firstTextAt === undefined ? undefined : turn.firstTextAt - turn.startedAt,
+			totalMs: Date.now() - turn.startedAt,
 			cost: turn.cost,
 			error: turn.error,
 			aborted: turn.aborted === true,
@@ -401,7 +440,14 @@ export default function piAside(pi: ExtensionAPI): void {
 	async function openReader(ctx: ExtensionContext): Promise<void> {
 		await ctx.ui.custom<void>(
 			(tui: Any, theme: Any, _keybindings: Any, done: (result: void) => void) =>
-				new Reader(readerTurns, theme, () => done(undefined), () => tui.requestRender(), () => tui.terminal?.rows ?? process.stdout.rows ?? 40),
+				new Reader(
+					readerTurns,
+					theme,
+					() => done(undefined),
+					() => tui.requestRender(),
+					() => tui.terminal?.rows ?? process.stdout.rows ?? 40,
+					markdownRenderer(theme),
+				),
 			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center" } as Any },
 		);
 	}
@@ -410,12 +456,61 @@ export default function piAside(pi: ExtensionAPI): void {
 
 	function renderNow(): void {
 		if (ctxRef?.mode !== "tui") return;
-		showPanel(panel.turns.length > 0);
+		showPanel(panel.turns.length > 0 && !panel.hidden);
+		animate();
 		try {
 			tuiRef?.requestRender();
 		} catch {
 			// not mounted
 		}
+	}
+
+	/** Whether the panel shows an answer still running (its spinner turns). */
+	function spinning(): boolean {
+		const turn = panel.turns.at(-1);
+		return !!turn && !turn.done && !panel.hidden && !panel.sentToAgent;
+	}
+
+	/** Redraw at the spinner's pace while an answer runs. */
+	function animate(): void {
+		if (ticker || !spinning()) return;
+		ticker = setInterval(() => {
+			if (!spinning() || ctxRef?.mode !== "tui") {
+				clearInterval(ticker);
+				ticker = undefined;
+			}
+			try {
+				tuiRef?.requestRender();
+			} catch {
+				// not mounted
+			}
+		}, SPIN_MS);
+		ticker.unref?.();
+	}
+
+	/** ctrl+o (`app.tools.expand`): a collapsed panel opens again, expanded; otherwise expanded and compact toggle. */
+	function toggleMore(): void {
+		if (panel.collapsed && !panel.hidden && panel.turns.length > 0) {
+			panel.collapsed = false;
+			panel.expanded = true;
+		} else {
+			panel.expanded = !panel.expanded;
+		}
+		renderNow();
+	}
+
+	/**
+	 * Enter on an empty editor puts the panel away (docs/ux.md §3.2): the frame collapses to one dim line, and the
+	 * next such Enter clears that line. The thread stays readable with `/aside`.
+	 */
+	function putAway(): boolean {
+		if (panel.turns.length === 0 || panel.hidden) return false;
+		if (panel.collapsed) panel.hidden = true;
+		else panel.collapsed = true;
+		handoff = undefined;
+		renderNow();
+		refreshBelow();
+		return true;
 	}
 
 	function showPanel(show: boolean): void {
@@ -432,7 +527,20 @@ export default function piAside(pi: ExtensionAPI): void {
 				PANEL_WIDGET,
 				(tui: Any, theme: Any) => {
 					tuiRef = tui;
-					return { render: (width: number) => renderPanel(panel, width, theme), invalidate() {} };
+					const md = markdownRenderer(theme);
+					return {
+						render: (width: number) => {
+							const rows = tui?.terminal?.rows ?? process.stdout.rows ?? 40;
+							panel.maxLines = Math.max(PANEL_LINES, rows - 14);
+							try {
+								panel.moreKey = keyText("app.tools.expand") || undefined;
+							} catch {
+								panel.moreKey = undefined;
+							}
+							return renderPanel(panel, width, theme, md, Date.now());
+						},
+						invalidate() {},
+					};
 				},
 				{ placement: "aboveEditor" },
 			);
@@ -462,6 +570,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (!ctx || ctx.mode !== "tui") return;
 		const state = belowState();
 		belowCache = state;
+		panel.editorEmpty = editorText().trim() === "";
 		const show = state.hint || state.ghost !== undefined;
 		try {
 			if (show !== belowShown) {
@@ -483,6 +592,22 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 	}
 
+	function editorText(): string {
+		try {
+			return ctxRef?.ui.getEditorText() ?? "";
+		} catch {
+			return "";
+		}
+	}
+
+	/** Whether Pi's input editor has the focus (not a selector, a dialog or another extension's overlay). */
+	function editorFocused(): boolean {
+		const focus = tuiRef?.getFocusedComponent;
+		if (typeof focus !== "function") return true;
+		const focused = focus.call(tuiRef);
+		return !!focused && typeof focused === "object" && focused.actionHandlers instanceof Map;
+	}
+
 	function installTui(ctx: ExtensionContext): void {
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
@@ -491,6 +616,11 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (ctx.mode !== "tui") return;
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 			const kb = getKeybindings();
+			if (kb.matches(data, "tui.input.submit") && editorText().trim() === "" && editorFocused() && putAway()) {
+				return { consume: true };
+			}
+			// Pi's "more" (ctrl+o) expands the aside with everything else; Pi still toggles its tool output.
+			if (kb.matches(data, "app.tools.expand") && editorFocused()) toggleMore();
 			if (handoff && kb.matches(data, "tui.input.tab")) {
 				let text = "";
 				try {

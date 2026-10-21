@@ -33,6 +33,10 @@ export interface Scripted {
 	errorBody?: unknown;
 	/** Send the 2xx headers, then hold the body until this resolves. */
 	hold?: Promise<void>;
+	/** Anthropic: a thinking block streamed before the text. */
+	thinking?: string;
+	/** Anthropic: hold between the thinking block and the text until this resolves. */
+	holdText?: Promise<void>;
 	/** Called when the request arrives, before the response. */
 	onRequest?: (request: Captured) => void;
 }
@@ -86,6 +90,17 @@ async function anthropic(res: ServerResponse, s: Scripted, model: string): Promi
 		},
 	});
 	let index = 0;
+	if (s.thinking) {
+		sseEvent(res, "content_block_start", { type: "content_block_start", index, content_block: { type: "thinking", thinking: "" } });
+		for (const piece of chunksOf(s.thinking, s.chunks ?? 1)) {
+			sseEvent(res, "content_block_delta", { type: "content_block_delta", index, delta: { type: "thinking_delta", thinking: piece } });
+			if (s.delayMs) await sleep(s.delayMs);
+		}
+		sseEvent(res, "content_block_delta", { type: "content_block_delta", index, delta: { type: "signature_delta", signature: "sig" } });
+		sseEvent(res, "content_block_stop", { type: "content_block_stop", index });
+		index++;
+	}
+	if (s.holdText) await s.holdText;
 	if (s.text !== undefined && s.text !== "") {
 		sseEvent(res, "content_block_start", { type: "content_block_start", index, content_block: { type: "text", text: "" } });
 		for (const piece of chunksOf(s.text, s.chunks ?? 1)) {

@@ -72,12 +72,48 @@ as cache read plus cache write. OpenAI APIs report no cache writes, so the prefi
 plus cache read). Anthropic reports the counts in its first stream event, so the figure is available while the main
 reply still streams.
 
-### 2.6 Not implemented
+### 2.6 Asides think at a low effort when that keeps the cache (amends design §4.2 C2, C3)
+
+An aside inherited the main session's thinking level. At `xhigh` the panel stayed empty for seconds while the
+model thought about a side question. Some models take effort changes in the middle of a conversation
+(`compat.supportsMidConvoEffort`): pi-ai then sends the level as a trailing configuration item (E: an Anthropic
+`system` item with `output_config.effort`, a Responses `configuration_update`), after the cached prefix, and keeps
+the top-level fields unchanged.
+
+On such models the aside asks at `low` when the main level is higher (`asideLevel` in `src/fork.ts`; a level the
+model's `thinkingLevelMap` lacks or maps to nothing is not used). The change is proved, not assumed: when the fork
+is made, a second dry run of T at the lower level must differ from B0 in E only (same core, same other top-level
+fields). Then C2 compares B1 with that dry run, and C3 compares E(F) with its E instead of E(P). Every other check
+is unchanged, so the request still extends P byte for byte up to E. Without the proof the aside keeps the main
+level. T1 uses the same rule on its own requests.
+
+Measured on the Anthropic relay (Claude Opus 5.5, main at `xhigh`, idle aside, two runs each): the first words came
+after 3.8 s at the main level and after 1.7–1.9 s at `low`; the cache read was the same (3,557 tokens, `exact`).
+
+### 2.7 The panel while an answer has no words yet, Markdown, and putting it away (amends ux §3.2)
+
+- Before the first words the panel shows Pi's spinner with `working` and the seconds so far. Once the model
+  thinks, the line says `thinking` and the last three lines of its (summarized) thinking follow, dim and italic.
+  Tool calls show as before (`reading src/a.ts`), with the spinner. While the answer streams, the spinner sits in
+  the title.
+- Answers, thinking and the reader are rendered with Pi's Markdown component and Markdown theme.
+- Enter on an empty editor puts the panel away: the frame collapses to its one dim line, and the next such Enter
+  clears that line. Pi does nothing on an empty Enter, so no meaning changes. While the editor is empty, the
+  frame's lower edge says `↵ hides`. A handoff suggestion goes away with the panel. `/aside` still rereads the
+  thread.
+- Pi's "more" key (`app.tools.expand`, ctrl+o, which Pi's own header teaches as `ctrl+o more`) also expands the
+  aside: a long answer gets the terminal's room (its height minus 14 lines) instead of 10 lines, and a collapsed
+  panel opens again. Pi still toggles its tool output, so the key keeps its meaning: show more. A truncated answer
+  ends with `… ctrl+o more` (the key as bound); an answer longer than the room ends with `… /aside to read all`.
+- The `/aside` reader opens at the latest question instead of the first.
+
+### 2.8 Not implemented
 
 - **The fork-point breakpoint (ux §5.5).** The aside's markers are pi-ai's defaults. When the main cache has
   expired, the aside pays the cold write, and the money line says so.
 - **A `background-work` emitter in pi-durable-subagents.** Until an emitter exists, "busy" means running, as ux §3.1
-  specifies for that case.
+  specifies for that case. So while the agent is idle and only subagents run, a `?` message goes to the agent as a
+  prompt (seen in real use, dsa 1.2.0); `/aside <question>` asks on the side meanwhile.
 - **The user studies of ux §6 (U1) and the 40-message misroute set (U8).** Both need real users and a real model.
   The route check is implemented and tested with scripted replies.
 
@@ -96,7 +132,8 @@ interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 | Fallbacks | A handler that rewrites the transcript, which gives T1 with a fresh session id; no main request yet, which gives T1 with the session's system prompt. |
 | Order | A payload replacement by an extension loaded after pi-aside (the tap). Loading as an installed package. |
 | Follow-ups | The fork continues; after the main session moves, it forks again with the earlier exchange quoted. |
-| TUI | The hint, a busy `?` asked on the side and never seen by the main session, collapse on the next send, CJK `？`, a steer without `?`, an idle `?` as a prompt, Esc aborting with the panel visible, Tab accepting the suggestion and Enter sending it with the side note, `route: agent` sent as a steer, a failed aside sent as a steer, a bracketed paste, and the waiting state. |
+| TUI | The hint, a busy `?` asked on the side and never seen by the main session, collapse on the next send, CJK `？`, a steer without `?`, an idle `?` as a prompt, Esc aborting with the panel visible, Tab accepting the suggestion and Enter sending it with the side note, `route: agent` sent as a steer, a failed aside sent as a steer, a bracketed paste, the waiting state, the spinner and thinking before the first words, Markdown, and Enter on an empty editor putting the panel away. |
+| Effort | On models with mid-conversation effort, the aside's E carries `low` and everything else matches the main request (Anthropic and Responses); other models keep the main level. |
 | Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money. |
 
 ### 3.2 Real provider (2026-10-21, a few cents in total)

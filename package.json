@@ -1,6 +1,6 @@
 {
   "name": "pi-aside",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi extension: ask a side question about a running session without touching it, at the cache-read price.",
   "type": "module",
   "license": "MIT",
