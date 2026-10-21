@@ -2,7 +2,23 @@ import { describe, expect, test } from "bun:test";
 import { BackgroundWork } from "../src/busy.ts";
 import { asideLevel, STILL_RUNNING, withPlaceholders } from "../src/fork.ts";
 import { Observer, type Recipe } from "../src/observe.ts";
-import { HIDE_HINT, moneyLine, panelBody, type PanelState, progressLines, Reader, renderPanel, spinnerFrame as f } from "../src/panel.ts";
+import {
+	CLEAR_HINT,
+	FOLD_HINT,
+	FOLLOW_HINT,
+	HINT,
+	moneyLine,
+	panelBody,
+	type PanelState,
+	panelRoom,
+	panelView,
+	progressLines,
+	Reader,
+	renderBelow,
+	renderPanel,
+	spinnerFrame as f,
+	typedText,
+} from "../src/panel.ts";
 import {
 	applyDelta,
 	checkC1,
@@ -342,31 +358,64 @@ describe("panel", () => {
 		expect(progressLines(turn({ activity: "reading a.ts" }) as never, 40, theme, md, 1_000)).toEqual([`${f(1_000)} reading a.ts`]);
 	});
 
-	test("the frame: spinner in the title while running, `↵ hides` on the lower edge while the editor is empty", () => {
+	test("the frame: spinner in the title while running, `↵ folds` on the lower edge while the editor is empty", () => {
 		const waiting = renderPanel(state({ editorEmpty: true }), 40, theme, undefined, 1_000);
 		expect(waiting[0]).not.toContain(f(1_000));
 		expect(waiting[1]).toContain(`${f(1_000)} working`);
-		expect(waiting.at(-1)).toContain(HIDE_HINT);
+		expect(waiting.at(-1)).toContain(FOLD_HINT);
 		const running = renderPanel(state({ editorEmpty: true }, { raw: "route: side\nBecause" }), 40, theme, undefined, 1_000);
 		expect(running[0]).toContain(`${f(1_000)} why B?`);
 		expect(running.join("\n")).not.toContain("working");
 		const done = renderPanel(state({ editorEmpty: false }, { done: true, raw: "route: side\nBecause." }), 40, theme, undefined, 1_000);
 		expect(done[0]).not.toContain(f(1_000));
 		expect(done.join("\n")).toContain("Because.");
-		expect(done.at(-1)).not.toContain(HIDE_HINT);
+		expect(done.at(-1)).not.toContain(FOLD_HINT);
 		for (const line of [...waiting, ...running, ...done]) expect(line.length).toBe(40);
 	});
 
-	test("a long answer: ten lines and `ctrl+o more`; expanded, up to the terminal's room, then `/aside`", () => {
+	test("the panel grows with its answer up to its room: half the screen while the agent runs, else above the editor", () => {
+		expect(panelRoom(40, true)).toBe(20);
+		expect(panelRoom(40, false)).toBe(30);
+		expect(panelRoom(8, true)).toBe(6);
+		const lines = Array.from({ length: 15 }, (_, i) => `line ${i + 1}`);
+		const raw = `route: side\n${lines.join("\n")}`;
+		expect(panelBody(state({ moreKey: "ctrl+o", maxLines: 20 }, { done: true, raw }), 40, theme)).toEqual(lines);
+		expect(panelBody(state({ moreKey: "ctrl+o", maxLines: 4 }, { done: true, raw: "route: side\nshort" }), 40, theme)).toEqual(["short"]);
+	});
+
+	test("a longer answer: its end while it streams, its start once done, one line counting the rest that claims ctrl+o", () => {
 		const raw = `route: side\n${Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join("\n")}`;
-		const compact = panelBody(state({ moreKey: "ctrl+o" }, { done: true, raw }), 40, theme);
-		expect(compact.length).toBe(11);
-		expect(compact.at(-1)).toBe("… ctrl+o more");
-		const roomy = panelBody(state({ moreKey: "ctrl+o", expanded: true, maxLines: 20 }, { done: true, raw }), 40, theme);
-		expect(roomy).toEqual(Array.from({ length: 15 }, (_, i) => `line ${i + 1}`));
-		const tight = panelBody(state({ moreKey: "ctrl+o", expanded: true, maxLines: 12 }, { done: true, raw }), 40, theme);
-		expect(tight.length).toBe(13);
-		expect(tight.at(-1)).toBe("… /aside to read all");
+		const done = panelView(state({ moreKey: "ctrl+o", maxLines: 12 }, { done: true, raw }), 40, theme);
+		expect(done.more).toBe("reader");
+		expect(renderPanel(state({ moreKey: "ctrl+o", maxLines: 12 }, { done: true, raw }), 40, theme).length).toBe(12);
+		const body = panelBody(state({ moreKey: "ctrl+o", maxLines: 12 }, { done: true, raw }), 40, theme);
+		expect(body).toEqual([...Array.from({ length: 9 }, (_, i) => `line ${i + 1}`), "↓ 6 more lines · ctrl+o"]);
+		const streaming = panelBody(state({ moreKey: "ctrl+o", maxLines: 12 }, { raw }), 40, theme, undefined, 1_000);
+		expect(streaming[0]).toBe("↑ 6 more lines · ctrl+o");
+		expect(streaming.at(-1)).toBe("line 15");
+		expect(streaming.length).toBe(10);
+		// Without Pi's key the panel claims nothing and points at `/aside`.
+		const keyless = panelView(state({ maxLines: 12 }, { done: true, raw }), 40, theme);
+		expect(keyless.more).toBeUndefined();
+		expect(keyless.lines.at(-2)).toContain("↓ 6 more lines · /aside");
+		// An answer that fits claims nothing: ctrl+o stays Pi's.
+		expect(panelView(state({ moreKey: "ctrl+o", maxLines: 30 }, { done: true, raw }), 40, theme).more).toBeUndefined();
+	});
+
+	test("a follow-up: the title is the new question, one dim line names the one before", () => {
+		const s = state({ maxLines: 12 }, { done: true, raw: "route: side\nYes, twice." });
+		s.turns.unshift(turn({ question: "why did it pick B?", done: true, raw: "route: side\nFewer callers." }) as never);
+		const lines = renderPanel({ ...s, turns: [...s.turns.slice(0, 1), turn({ question: "is A still used?", done: true, raw: "route: side\nYes, twice." }) as never] }, 50, theme);
+		expect(lines[0]).toContain("is A still used?");
+		expect(lines[1]).toContain("after: why did it pick B?");
+		expect(lines[2]).toContain("Yes, twice.");
+		expect(lines.join("\n")).not.toContain("Fewer callers.");
+	});
+
+	test("the hint below the editor says whether Enter asks afresh or follows up", () => {
+		expect(renderBelow({ hint: "ask", ghost: undefined }, 100, theme)).toEqual([HINT]);
+		expect(renderBelow({ hint: "follow", ghost: undefined }, 100, theme)).toEqual([FOLLOW_HINT]);
+		expect(renderBelow({ hint: undefined, ghost: undefined }, 100, theme)).toEqual([]);
 	});
 
 	test("the reader opens at the latest question", () => {
@@ -382,8 +431,31 @@ describe("panel", () => {
 		expect(reader.render(60)[1]).toContain("? question 1?");
 	});
 
-	test("collapsed: one line, a spinner while the answer runs; hidden: nothing", () => {
+	test("typing in the reader closes it and hands the text on; keys scroll", () => {
+		const turns = [{ question: "q?", answer: Array.from({ length: 40 }, (_, i) => `a${i}`).join("\n"), detail: "exact" }];
+		let closed = 0;
+		const typed: string[] = [];
+		const reader = new Reader(() => turns, theme, () => closed++, () => {}, () => 20, undefined, (t) => typed.push(t));
+		expect(reader.render(60).at(-1)).toContain("type to follow up");
+		reader.handleInput("\x1b[B");
+		reader.handleInput("j");
+		expect(closed).toBe(1);
+		expect(typed).toEqual(["j"]);
+		reader.handleInput("\u4e3a");
+		expect(typed).toEqual(["j", "\u4e3a"]);
+		reader.handleInput("\r");
+		expect(closed).toBe(3);
+		expect(typedText("\x1b[A")).toBeUndefined();
+		expect(typedText("\x7f")).toBeUndefined();
+		expect(typedText(" ")).toBe(" ");
+	});
+
+	test("folded: one line, a spinner while the answer runs, `↵ clears` while the editor is empty; cleared: nothing", () => {
 		expect(renderPanel(state({ collapsed: true }, { done: true }), 40, theme, undefined, 1_000)).toEqual(["▸ why B?"]);
+		const folded = panelView(state({ collapsed: true, editorEmpty: true, moreKey: "ctrl+o" }, { done: true }), 40, theme);
+		expect(folded.lines).toEqual([`▸ why B?${" ".repeat(40 - 8 - CLEAR_HINT.length)}${CLEAR_HINT}`]);
+		// A folded panel never claims Pi's "more" key.
+		expect(folded.more).toBeUndefined();
 		expect(renderPanel(state({ collapsed: true }), 40, theme, undefined, 1_000)).toEqual([`${f(1_000)} why B?`]);
 		expect(renderPanel(state({ collapsed: true, hidden: true }), 40, theme, undefined, 1_000)).toEqual([]);
 	});

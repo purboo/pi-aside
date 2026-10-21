@@ -90,22 +90,33 @@ level. T1 uses the same rule on its own requests.
 Measured on the Anthropic relay (Claude Opus 5.5, main at `xhigh`, idle aside, two runs each): the first words came
 after 3.8 s at the main level and after 1.7–1.9 s at `low`; the cache read was the same (3,557 tokens, `exact`).
 
-### 2.7 The panel while an answer has no words yet, Markdown, and putting it away (amends ux §3.2)
+### 2.7 The panel: progress, Markdown, room, folding, follow-ups and the reader (amends ux §3.2)
 
 - Before the first words the panel shows Pi's spinner with `working` and the seconds so far. Once the model
   thinks, the line says `thinking` and the last three lines of its (summarized) thinking follow, dim and italic.
   Tool calls show as before (`reading src/a.ts`), with the spinner. While the answer streams, the spinner sits in
   the title.
 - Answers, thinking and the reader are rendered with Pi's Markdown component and Markdown theme.
-- Enter on an empty editor puts the panel away: the frame collapses to its one dim line, and the next such Enter
+- Enter on an empty editor puts the panel away: the frame folds to its one dim line, and the next such Enter
   clears that line. Pi does nothing on an empty Enter, so no meaning changes. While the editor is empty, the
-  frame's lower edge says `↵ hides`. A handoff suggestion goes away with the panel. `/aside` still rereads the
-  thread.
-- Pi's "more" key (`app.tools.expand`, ctrl+o, which Pi's own header teaches as `ctrl+o more`) also expands the
-  aside: a long answer gets the terminal's room (its height minus 14 lines) instead of 10 lines, and a collapsed
-  panel opens again. Pi still toggles its tool output, so the key keeps its meaning: show more. A truncated answer
-  ends with `… ctrl+o more` (the key as bound); an answer longer than the room ends with `… /aside to read all`.
-- The `/aside` reader opens at the latest question instead of the first.
+  frame's lower edge says `↵ folds` and the folded line `↵ clears`. A handoff suggestion goes away with the panel.
+  `/aside` still rereads the thread.
+- **Room (0.3.0).** The panel grows with its answer up to `panelRoom`: half the terminal's rows while the agent
+  runs (its work stays in view), the rows minus 10 (Pi's editor, the hint and the footer) otherwise, never fewer
+  than 6, frame included. A longer answer shows its end while it streams and its start once done; one dim line
+  counts the rest, `↑`/`↓ 12 more lines · ctrl+o` (the key as bound, `/aside` when unbound).
+- **ctrl+o only where it is printed (0.3.0).** The panel claims Pi's "more" key (`app.tools.expand`) only while its
+  last render printed it (the count line of an open panel), consumes it there and opens the reader. Everywhere
+  else, including the folded line, the key is Pi's alone (tool output). A folded panel is one the user is done
+  with; claiming the key there would take tool output away for as long as the line stays.
+- **Open means follow-up (0.3.0).** The next question continues the thread exactly while its panel is open (not
+  folded, cleared or sent to the agent) and the thread is still valid; otherwise it starts a new thread. The hint
+  below the editor names the outcome before Enter: `↵ follows up on the side` or `↵ asks on the side`. A
+  follow-up's panel has the new question as its title and one dim line `after: <the question before>`; the panel
+  only ever shows the latest question.
+- **The reader.** `/aside` (or ctrl+o on a count line) opens it at the latest question. Esc, Enter and ctrl+o close
+  it. A printable key (Kitty CSI-u decoded, IME text included) closes it, opens the panel again and goes on in the
+  editor through `pasteToEditor`, so a follow-up never needs a key first; the letter keys no longer scroll.
 
 ### 2.8 Not implemented
 
@@ -119,7 +130,7 @@ after 3.8 s at the main level and after 1.7–1.9 s at `low`; the cache read was
 
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, about 30 s, 111 tests)
+### 3.1 Offline (`bun run check`, about 40 s, 128 tests)
 
 A local capture server speaks the three APIs as pi-ai consumes them. Real Pi 1.3.0 runs over RPC and, for the
 interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
@@ -132,9 +143,9 @@ interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 | Fallbacks | A handler that rewrites the transcript, which gives T1 with a fresh session id; no main request yet, which gives T1 with the session's system prompt. |
 | Order | A payload replacement by an extension loaded after pi-aside (the tap). Loading as an installed package. |
 | Follow-ups | The fork continues; after the main session moves, it forks again with the earlier exchange quoted. |
-| TUI | The hint, a busy `?` asked on the side and never seen by the main session, collapse on the next send, CJK `？`, a steer without `?`, an idle `?` as a prompt, Esc aborting with the panel visible, Tab accepting the suggestion and Enter sending it with the side note, `route: agent` sent as a steer, a failed aside sent as a steer, a bracketed paste, the waiting state, the spinner and thinking before the first words, Markdown, and Enter on an empty editor putting the panel away. |
+| TUI | The hint, a busy `?` asked on the side and never seen by the main session, collapse on the next send, CJK `？`, a steer without `?`, an idle `?` as a prompt, Esc aborting with the panel visible, Tab accepting the suggestion and Enter sending it with the side note, `route: agent` sent as a steer, a failed aside sent as a steer, a bracketed paste, the waiting state, the spinner and thinking before the first words, Markdown, Enter on an empty editor folding then clearing the panel, a long answer counted and opened in the reader by ctrl+o, typing in the reader going on in the editor, ctrl+o left to Pi on a folded panel, and the follow-up hint (open panel) against a fresh question (folded panel). |
 | Effort | On models with mid-conversation effort, the aside's E carries `low` and everything else matches the main request (Anthropic and Responses); other models keep the main level. |
-| Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money. |
+| Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money, the panel room and count line, the claim on ctrl+o, the reader's keys. |
 
 ### 3.2 Real provider (2026-10-21, a few cents in total)
 

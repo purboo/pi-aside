@@ -40,12 +40,14 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | The same while the agent is idle | Pi's meaning: a normal prompt. |
 | Anything without a final question mark | Pi's meaning: a steer while running, a prompt while idle. |
 | Alt+Enter | Pi's meaning: a follow-up. |
-| Another `?` message while the answer is shown | Continues the side conversation. |
-| Send anything to the agent | The answer collapses to one dim line. |
-| Enter on an empty editor | Puts the answer away: first to one dim line, then gone. The frame shows `↵ hides` while the editor is empty. |
-| ctrl+o (Pi's "more") | Expands a long answer, or reopens a collapsed one. Pi still toggles its tool output. |
+| Another `?` message while the answer is shown | Follows up in the same side conversation. The hint says `↵ follows up on the side`, the panel's title becomes your new question, and one dim line names the one before. |
+| A `?` message after the answer was folded or cleared | A fresh side conversation (`↵ asks on the side`). |
+| Send anything to the agent | The answer folds to one dim line. |
+| Enter on an empty editor | Puts the answer away: first it folds to one dim line (`↵ folds`), then that line goes (`↵ clears`). |
+| ctrl+o where a long answer shows `↓ 12 more lines · ctrl+o` | Opens the whole conversation in a reader. Everywhere else ctrl+o keeps Pi's meaning (tool output). |
+| Typing in the reader | Closes it and goes on in the editor; the panel opens again, so a `?` follows up. |
 | `/aside <question>` | Asks on the side, busy or not. |
-| `/aside` | Opens the latest side conversation in a reader, at the latest question. Esc closes it. |
+| `/aside` | Opens the latest side conversation in the reader, at the latest question. Esc closes it. |
 | Tab on an empty editor when `⇥ suggestion` is shown | Accepts the aside's suggested instruction for the agent. Enter sends it, with the side Q&A attached as a note. |
 | Esc | Pi's meaning: aborts the agent. pi-aside never takes focus. |
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- The panel grows with its answer instead of stopping at 10 lines: up to half the screen while the agent runs, so
+  its work stays in view, and up to the room above Pi's editor otherwise. A longer answer shows its end while it
+  streams and its start once it is done, with one line counting the rest: `↓ 12 more lines · ctrl+o`.
+- ctrl+o belongs to the panel only where the panel prints it, and there it opens the reader. Everywhere else it is
+  Pi's again (tool output); 0.2.0 toggled both.
+- An open panel means a follow-up, a folded or cleared one a fresh question, and the hint under the editor says
+  which before Enter: `↵ follows up on the side` or `↵ asks on the side`.
+- A follow-up's panel shows the new question as its title and one dim line naming the question before.
+- Enter on an empty editor folds the panel (`↵ folds`), then clears the folded line (`↵ clears`).
+- Typing in the reader closes it and goes on in the editor, with the panel open again; Enter and ctrl+o close it
+  too. Its letter keys (`q`, `j`, `k`, space) no longer scroll, since they type.
+
 ## 0.2.0
 
 - The panel is never an empty box: before the first words it shows Pi's spinner with `working` and the seconds so
