@@ -3,8 +3,8 @@ import { BackgroundWork } from "../src/busy.ts";
 import { asideLevel, STILL_RUNNING, withPlaceholders } from "../src/fork.ts";
 import { Observer, type Recipe } from "../src/observe.ts";
 import {
-	CLEAR_HINT,
-	FOLD_HINT,
+	CLOSE_MARK,
+	closeZone,
 	FOLLOW_HINT,
 	HINT,
 	moneyLine,
@@ -31,7 +31,8 @@ import {
 	splitList,
 	strip,
 } from "../src/payload.ts";
-import { notice } from "../src/thread.ts";
+import { hasRouteLine } from "../src/reply.ts";
+import { activityFor, notice, oneLine } from "../src/thread.ts";
 import { UsageQueue } from "../src/usage.ts";
 
 const A = "anthropic-messages";
@@ -276,10 +277,31 @@ describe("placeholders, notice, money", () => {
 		expect(notice({ routeCheck: true })).toContain("route: side");
 		expect(notice({ routeCheck: false })).not.toContain("route: side");
 		expect(notice({ routeCheck: false })).toContain("handoff:");
+		// The route line comes before any tool call, and a task unrelated to the agent's work stays on the side.
+		expect(notice({ routeCheck: true })).toContain("before any tool call");
+		expect(notice({ routeCheck: true })).toContain("not part of the agent's work");
+		expect(notice({ routeCheck: false })).toContain("bash");
+	});
+
+	test("a route line counts only when written out", () => {
+		expect(hasRouteLine("route: side\nok")).toBe(true);
+		expect(hasRouteLine("\n**route: agent**")).toBe(true);
+		expect(hasRouteLine("route: side")).toBe(true);
+		expect(hasRouteLine("")).toBe(false);
+		expect(hasRouteLine("Let me check.\nroute: side")).toBe(false);
+	});
+
+	test("what a tool call does, in a few words", () => {
+		expect(activityFor({ name: "bash", arguments: { command: "du -sh ~/.cache/* | sort -h" } })).toBe("$ du -sh ~/.cache/* | sort -h");
+		expect(activityFor({ name: "bash", arguments: { command: "cd /tmp\nrm -rf x" } })).toBe("$ cd /tmp \u2026");
+		expect(activityFor({ name: "write", arguments: { path: "notes/pi-zip.md", content: "x" } })).toBe("write notes/pi-zip.md");
+		expect(activityFor({ name: "edit", arguments: { path: "a.ts", edits: [] } })).toBe("edit a.ts");
+		expect(activityFor({ name: "subagents", arguments: {} })).toBe("subagents");
+		expect(oneLine("x".repeat(100), 10)).toBe(`${"x".repeat(9)}\u2026`);
 	});
 
 	test("money appears only when it is news", () => {
-		const base = { question: "q", raw: "", done: true, startedAt: 0, cost: 0.03, read: 1000, written: 0, tier: "exact" as const };
+		const base = { question: "q", raw: "", done: true, steps: [], startedAt: 0, cost: 0.03, read: 1000, written: 0, tier: "exact" as const };
 		expect(moneyLine(base)).toBeUndefined();
 		expect(moneyLine({ ...base, cost: 0.77, written: 150_000 })).toBe("main cache had expired · $0.77");
 		expect(moneyLine({ ...base, cost: 0.71, tier: "rebuilt", reason: "a handler changed `tools`" })).toBe(
@@ -337,6 +359,7 @@ describe("panel", () => {
 		question: "why B?",
 		raw: "",
 		done: false,
+		steps: [],
 		startedAt: 1_000,
 		cost: 0,
 		read: 0,
@@ -345,7 +368,6 @@ describe("panel", () => {
 	});
 	const state = (over: Partial<PanelState> = {}, t: Record<string, unknown> = {}): PanelState => ({
 		turns: [turn(t) as never],
-		collapsed: false,
 		...over,
 	});
 
@@ -358,19 +380,47 @@ describe("panel", () => {
 		expect(progressLines(turn({ activity: "reading a.ts" }) as never, 40, theme, md, 1_000)).toEqual([`${f(1_000)} reading a.ts`]);
 	});
 
-	test("the frame: spinner in the title while running, `↵ folds` on the lower edge while the editor is empty", () => {
-		const waiting = renderPanel(state({ editorEmpty: true }), 40, theme, undefined, 1_000);
+	test("the frame: spinner in the title while running, the close mark on the top edge where Pi reports the mouse", () => {
+		const waiting = renderPanel(state(), 40, theme, undefined, 1_000);
 		expect(waiting[0]).not.toContain(f(1_000));
+		expect(waiting[0]).not.toContain(CLOSE_MARK);
 		expect(waiting[1]).toContain(`${f(1_000)} working`);
-		expect(waiting.at(-1)).toContain(FOLD_HINT);
-		const running = renderPanel(state({ editorEmpty: true }, { raw: "route: side\nBecause" }), 40, theme, undefined, 1_000);
+		expect(waiting.at(-1)).toBe(`╰${"─".repeat(38)}╯`);
+		const running = renderPanel(state({ mouse: true }, { raw: "route: side\nBecause" }), 40, theme, undefined, 1_000);
 		expect(running[0]).toContain(`${f(1_000)} why B?`);
 		expect(running.join("\n")).not.toContain("working");
-		const done = renderPanel(state({ editorEmpty: false }, { done: true, raw: "route: side\nBecause." }), 40, theme, undefined, 1_000);
+		const done = renderPanel(state({ mouse: true }, { done: true, raw: "route: side\nBecause." }), 40, theme, undefined, 1_000);
 		expect(done[0]).not.toContain(f(1_000));
+		expect(done[0]!.endsWith(` ${CLOSE_MARK} ─╮`)).toBe(true);
+		// The mark sits at column width - 4, inside the zone where a click or a tap closes the panel.
+		expect([...done[0]!].indexOf(CLOSE_MARK)).toBe(36);
+		const [from, to] = closeZone(40);
+		expect(from <= 36 && 36 <= to && to <= 39).toBe(true);
 		expect(done.join("\n")).toContain("Because.");
-		expect(done.at(-1)).not.toContain(FOLD_HINT);
 		for (const line of [...waiting, ...running, ...done]) expect(line.length).toBe(40);
+		// A long question leaves the close mark in place.
+		const long = renderPanel(state({ mouse: true }, { question: "why ".repeat(30), done: true, raw: "ok" }), 40, theme);
+		// biome-ignore lint/suspicious/noControlCharactersInRegex: ANSI resets that truncation adds.
+		const plain = long[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(plain.length).toBe(40);
+		expect([...plain].indexOf(CLOSE_MARK)).toBe(36);
+	});
+
+	test("what the aside did comes first, one dim line per step", () => {
+		const steps = [
+			{ label: "$ du -sh ~/.cache", ok: true },
+			{ label: "write notes/x.md", ok: false },
+		];
+		const body = panelBody(state({ maxLines: 12 }, { done: true, steps, raw: "route: side\nDone." }), 40, theme);
+		expect(body).toEqual(["✓ $ du -sh ~/.cache", "✗ write notes/x.md", "Done."]);
+		const running = panelBody(
+			state({ maxLines: 12 }, { steps: steps.slice(0, 1), activity: "$ rm -rf ~/.cache/pip", raw: "route: side\n" }),
+			40,
+			theme,
+			undefined,
+			1_000,
+		);
+		expect(running).toEqual(["✓ $ du -sh ~/.cache", `${f(1_000)} $ rm -rf ~/.cache/pip`]);
 	});
 
 	test("the panel grows with its answer up to its room: half the screen while the agent runs, else above the editor", () => {
@@ -400,6 +450,20 @@ describe("panel", () => {
 		expect(keyless.lines.at(-2)).toContain("↓ 6 more lines · /aside");
 		// An answer that fits claims nothing: ctrl+o stays Pi's.
 		expect(panelView(state({ moreKey: "ctrl+o", maxLines: 30 }, { done: true, raw }), 40, theme).more).toBeUndefined();
+	});
+
+	test("scrolled: a count above and below, and both open the reader when clicked", () => {
+		const raw = `route: side\n${Array.from({ length: 15 }, (_, i) => `line ${i + 1}`).join("\n")}`;
+		const view = panelView(state({ moreKey: "ctrl+o", maxLines: 12, scrollTop: 3 }, { done: true, raw }), 40, theme);
+		const body = view.lines.slice(1, -1).map((line) => line.slice(2, -2).trimEnd());
+		expect(body).toEqual(["↑ 3 more lines", ...Array.from({ length: 8 }, (_, i) => `line ${i + 4}`), "↓ 4 more lines · ctrl+o"]);
+		expect(view.readerRows).toEqual([1, 10]);
+		expect(view.scroll).toEqual({ top: 3, max: 6 });
+		// Past the end it stops at the end; an answer that fits does not scroll.
+		const end = panelView(state({ moreKey: "ctrl+o", maxLines: 12, scrollTop: 99 }, { done: true, raw }), 40, theme);
+		expect(end.scroll).toEqual({ top: 6, max: 6 });
+		expect(end.lines.at(-2)).toContain("line 15");
+		expect(panelView(state({ maxLines: 30 }, { done: true, raw }), 40, theme).scroll).toBeUndefined();
 	});
 
 	test("a follow-up: the title is the new question, one dim line names the one before", () => {
@@ -450,13 +514,19 @@ describe("panel", () => {
 		expect(typedText(" ")).toBe(" ");
 	});
 
-	test("folded: one line, a spinner while the answer runs, `↵ clears` while the editor is empty; cleared: nothing", () => {
-		expect(renderPanel(state({ collapsed: true }, { done: true }), 40, theme, undefined, 1_000)).toEqual(["▸ why B?"]);
-		const folded = panelView(state({ collapsed: true, editorEmpty: true, moreKey: "ctrl+o" }, { done: true }), 40, theme);
-		expect(folded.lines).toEqual([`▸ why B?${" ".repeat(40 - 8 - CLEAR_HINT.length)}${CLEAR_HINT}`]);
-		// A folded panel never claims Pi's "more" key.
-		expect(folded.more).toBeUndefined();
-		expect(renderPanel(state({ collapsed: true }), 40, theme, undefined, 1_000)).toEqual([`${f(1_000)} why B?`]);
-		expect(renderPanel(state({ collapsed: true, hidden: true }), 40, theme, undefined, 1_000)).toEqual([]);
+	test("closed: nothing on screen, and nothing claimed", () => {
+		const closed = panelView(state({ hidden: true, moreKey: "ctrl+o", maxLines: 4 }, { done: true, raw: "a\nb\nc\nd\ne" }), 40, theme);
+		expect(closed).toEqual({ lines: [] });
+	});
+
+	test("the wheel or a swipe scrolls the reader", () => {
+		const turns = [{ question: "q?", answer: Array.from({ length: 40 }, (_, i) => `a${i}`).join("\n"), detail: "exact", steps: ["✓ $ ls"] }];
+		const reader = new Reader(() => turns, theme, () => {}, () => {}, () => 20);
+		const first = reader.render(60);
+		expect(first[1]).toContain("? q?");
+		expect(first[3]).toContain("✓ $ ls");
+		expect(reader.handleMouse({ type: "wheel", wheelDelta: 3 })).toEqual({ handled: true });
+		expect(reader.render(60)[1]).not.toContain("? q?");
+		expect(reader.handleMouse({ type: "press" })).toBeUndefined();
 	});
 });

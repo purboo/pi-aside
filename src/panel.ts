@@ -1,6 +1,7 @@
 // What the user sees (docs/ux.md §3.2–§3.5): the answer panel above the editor, the hint and the handoff ghost
-// text below it, and the `/aside` reader overlay. None of them takes focus except the reader, which is an explicit
-// modal closed with Esc.
+// text below it, and the `/aside` reader overlay. None of them takes the keyboard focus except the reader, which is
+// an explicit modal. The panel works like a small window on top of the conversation: Esc or its "✕" closes it, and
+// the wheel (a swipe on a touch screen) over it scrolls it.
 
 import {
 	decodeKittyPrintable,
@@ -29,10 +30,8 @@ export const MONEY_THRESHOLD = 0.25;
 export const HINT = "↵ asks on the side · corrections still reach the agent";
 /** The hint while the panel is open: the next question continues its thread (docs/ux.md §3.2). */
 export const FOLLOW_HINT = "↵ follows up on the side · corrections still reach the agent";
-/** On the open panel's lower edge while the editor is empty: Enter there folds it to one line. */
-export const FOLD_HINT = "↵ folds";
-/** On the folded line while the editor is empty: Enter there clears it. */
-export const CLEAR_HINT = "↵ clears";
+/** The close mark on the panel's top edge, where a click or a tap closes it (shown where Pi reports the mouse). */
+export const CLOSE_MARK = "✕";
 
 /** Pi's own loader frames. */
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -44,16 +43,19 @@ export function spinnerFrame(now: number): string {
 
 export interface PanelState {
 	turns: TurnView[];
-	/** One dim line instead of the frame. */
-	collapsed: boolean;
-	/** Not shown at all (`/aside` still rereads the thread). */
+	/** Closed: not shown at all (`/aside` still rereads the thread). */
 	hidden?: boolean;
-	/** Whether the editor is empty and has the focus: Enter then folds or clears the panel, and the panel says so. */
-	editorEmpty?: boolean;
 	/** Lines the whole panel may take, frame included (`panelRoom`). */
 	maxLines?: number;
 	/** Pi's "more" key (`app.tools.expand`, ctrl+o) as Pi shows it; the panel claims it only where it prints it. */
 	moreKey?: string;
+	/** Whether Pi reports the mouse (fullscreen mode): the panel then shows its close mark. */
+	mouse?: boolean;
+	/**
+	 * The first line of a long answer in view, where the user scrolled it. Undefined follows the answer: its end
+	 * while it streams, its start once it is done.
+	 */
+	scrollTop?: number;
 	/** Set when the route check sent the text to the agent. */
 	sentToAgent?: { text: string; waiting: boolean };
 }
@@ -106,12 +108,19 @@ function thinkingTail(text: string): string {
 export function progressLines(turn: TurnView, width: number, theme: Theme, md: MarkdownRenderer, now: number): string[] {
 	const spin = theme.fg("accent", spinnerFrame(now));
 	const dim = (s: string) => theme.fg("dim", s);
-	if (turn.activity) return [`${spin} ${dim(`${turn.activity}${elapsed(turn, now)}`)}`];
+	if (turn.activity) return [`${spin} ${dim(truncateToWidth(`${turn.activity}${elapsed(turn, now)}`, Math.max(4, width - 2), "…"))}`];
 	if (turn.thinking?.trim()) {
 		const tail = md(thinkingTail(turn.thinking), Math.max(10, width - 2), "thinking").filter((line) => line.trim() !== "");
 		return [`${spin} ${dim(`thinking${elapsed(turn, now)}`)}`, ...tail.slice(-THINKING_LINES).map((line) => `  ${line}`)];
 	}
 	return [`${spin} ${dim(`working${elapsed(turn, now)}`)}`];
+}
+
+/** What the aside did (its finished bash, edit and write calls), one dim line each. */
+export function stepLines(turn: TurnView, width: number, theme: Theme): string[] {
+	return (turn.steps ?? []).map((step) =>
+		truncateToWidth(step.ok ? theme.fg("dim", `✓ ${step.label}`) : theme.fg("error", `✗ ${step.label}`), width, "…"),
+	);
 }
 
 /**
@@ -129,15 +138,24 @@ export interface PanelView {
 	lines: string[];
 	/** Set only when the panel prints the key: elsewhere it keeps Pi's meaning. */
 	more?: MoreAction;
+	/** Lines (indexes into `lines`) that open the reader when clicked or tapped: the "more lines" counts. */
+	readerRows?: number[];
+	/** The long answer's scroll position and its largest value; undefined when it fits. */
+	scroll?: { top: number; max: number };
 }
 
 function moreLabel(state: PanelState): string {
 	return state.moreKey ? ` · ${state.moreKey}` : " · /aside";
 }
 
+function count(n: number): string {
+	return `${n} more ${n === 1 ? "line" : "lines"}`;
+}
+
 /**
- * Body lines of the open panel (without the frame). The panel grows with its answer up to `maxLines`; a longer
- * answer shows its end while it streams and its start once it is done, with one line counting the rest.
+ * Body lines of the open panel (without the frame). The panel grows with its answer up to `maxLines`. A longer
+ * answer scrolls: by default it shows its end while it streams and its start once it is done, with a line counting
+ * what is above or below.
  */
 export function panelBodyView(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): PanelView {
 	const turn = state.turns.at(-1);
@@ -151,9 +169,9 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 	if (previous) head.push(truncateToWidth(dim(`after: ${previous.question.replace(/\s+/g, " ")}`), width, "…"));
 	const tail: string[] = [];
 	const parsed = parseReply(turn.raw, turn.done);
-	const body = parsed.body ? md(parsed.body, width) : [];
+	const body = [...stepLines(turn, width, theme), ...(parsed.body ? md(parsed.body, width) : [])];
 	if (!turn.done) {
-		if (turn.activity || body.length === 0) tail.push(...progressLines(turn, width, theme, md, now));
+		if (turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
 	} else {
 		if (turn.aborted) tail.push(dim("stopped"));
 		if (turn.error) tail.push(theme.fg("error", `aside failed: ${turn.error}`));
@@ -162,12 +180,28 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 	if (money) tail.push(dim(money));
 	const room = Math.max(2, (state.maxLines ?? PANEL_LINES) - 2 - head.length - tail.length);
 	if (body.length <= room) return { lines: [...head, ...body, ...tail] };
-	const shown = room - 1;
-	const rest = body.length - shown;
-	const count = `${rest} more ${rest === 1 ? "line" : "lines"}${moreLabel(state)}`;
+	// Scrolled to the end, the view has the "above" line and room - 1 lines of the answer.
+	const max = body.length - (room - 1);
+	const auto = turn.done ? 0 : max;
+	const top = Math.min(max, Math.max(0, state.scrollTop ?? auto));
+	let shown = room - (top > 0 ? 1 : 0);
+	const below = top + shown < body.length;
+	if (below) shown -= 1;
+	const lines = [...head];
+	const readerRows: number[] = [];
+	const key = moreLabel(state);
+	if (top > 0) {
+		readerRows.push(lines.length);
+		lines.push(dim(`↑ ${count(top)}${below ? "" : key}`));
+	}
+	lines.push(...body.slice(top, top + shown));
+	if (below) {
+		readerRows.push(lines.length);
+		lines.push(dim(`↓ ${count(body.length - top - shown)}${key}`));
+	}
+	lines.push(...tail);
 	const more: MoreAction | undefined = state.moreKey ? "reader" : undefined;
-	if (!turn.done) return { lines: [...head, dim(`↑ ${count}`), ...body.slice(-shown), ...tail], more };
-	return { lines: [...head, ...body.slice(0, shown), dim(`↓ ${count}`), ...tail], more };
+	return { lines, more, readerRows, scroll: { top, max } };
 }
 
 /** Body lines of the panel for its current state (without the frame). */
@@ -176,49 +210,42 @@ export function panelBody(state: PanelState, width: number, theme: Theme, md: Ma
 }
 
 /**
- * The framed panel (rounded box with the latest question as its title, a spinner before it while the answer streams,
- * and `↵ folds` on the lower edge while the editor is empty), one dim line when folded, nothing when cleared.
+ * The framed panel: a rounded box with the latest question as its title, a spinner before it while the answer
+ * streams, and the close mark on the top edge where Pi reports the mouse. Nothing when closed.
  */
 export function renderPanel(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): string[] {
 	return panelView(state, width, theme, md, now).lines;
 }
 
-/** `renderPanel`, and what Pi's "more" key does while these lines are on screen. */
+/** Columns of the top edge where a click or a tap closes the panel: the close mark and a cell around it. */
+export function closeZone(width: number): [number, number] {
+	return [width - 5, width - 1];
+}
+
+/** `renderPanel`, and what the keys and the mouse do while these lines are on screen. */
 export function panelView(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): PanelView {
 	const turn = state.turns.at(-1);
 	if (!turn || state.hidden) return { lines: [] };
 	const border = (s: string) => theme.fg("borderMuted", s);
 	const question = turn.question.replace(/\s+/g, " ");
 	const running = !turn.done && !state.sentToAgent;
-	if (state.collapsed) {
-		const mark = running ? theme.fg("accent", spinnerFrame(now)) : theme.fg("dim", "▸");
-		// A folded panel is one the user is done with: it does not claim Pi's "more" key (their tool output).
-		const keys = state.editorEmpty ? CLEAR_HINT : "";
-		const left = `${mark} ${theme.fg("dim", question)}`;
-		if (!keys || width < visibleWidth(keys) + 12) return { lines: [truncateToWidth(left, width)] };
-		const fitted = truncateToWidth(left, width - visibleWidth(keys) - 3, "…");
-		const gap = " ".repeat(Math.max(2, width - visibleWidth(fitted) - visibleWidth(keys)));
-		return { lines: [`${fitted}${gap}${theme.fg("dim", keys)}`] };
-	}
 	const inner = Math.max(10, width - 4);
 	// The spinner sits in the title while the answer streams, and on the progress line before it (never both).
 	const progress = !!turn.activity || parseReply(turn.raw, turn.done).body === "";
 	const spin = running && !progress ? `${spinnerFrame(now)} ` : "";
-	const title = truncateToWidth(` ${spin}${question} `, Math.max(4, width - 6), "…");
-	const top = border("╭─") + theme.fg("muted", title) + border(`${"─".repeat(Math.max(0, width - 3 - visibleWidth(title)))}╮`);
+	// The close mark sits at column width - 4: "╭─" title fill " ✕ " "─╮".
+	const close = state.mouse && width >= 20 ? ` ${CLOSE_MARK} ` : "";
+	const title = truncateToWidth(` ${spin}${question} `, Math.max(4, width - 6 - visibleWidth(close)), "…");
+	const fill = Math.max(0, width - 3 - visibleWidth(title) - (close ? visibleWidth(close) + 1 : 0));
+	const top = border("╭─") + theme.fg("muted", title) + border("─".repeat(fill)) + (close ? theme.fg("dim", close) + border("─") : "") + border("╮");
 	const out = [truncateToWidth(top, width)];
 	const body = panelBodyView(state, inner, theme, md, now);
 	for (const line of body.lines) {
 		const text = truncateToWidth(line.replace(/\s+$/u, ""), inner);
 		out.push(`${border("│")} ${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))} ${border("│")}`);
 	}
-	const hint = state.editorEmpty ? ` ${FOLD_HINT} ` : "";
-	if (hint && width >= visibleWidth(hint) + 6) {
-		out.push(border(`╰${"─".repeat(Math.max(0, width - 3 - visibleWidth(hint)))}`) + theme.fg("dim", hint) + border("─╯"));
-	} else {
-		out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
-	}
-	return { lines: out, more: body.more };
+	out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	return { lines: out, more: body.more, readerRows: body.readerRows?.map((row) => row + 1), scroll: body.scroll };
 }
 
 /** What Enter would do with the editor's text: nothing new, ask on the side, or follow up on the open panel's thread. */
@@ -236,6 +263,8 @@ export interface ReaderTurn {
 	question: string;
 	answer: string;
 	detail: string;
+	/** What the aside did, one line each (`✓ $ du -sh ~`). */
+	steps?: string[];
 }
 
 /** Text a key press would type, or undefined for keys, releases and control characters. */
@@ -251,7 +280,7 @@ export function typedText(data: string): string | undefined {
 /**
  * The `/aside` reader: every question and answer of the latest thread, opened at the latest question. Esc, Enter
  * and Pi's "more" key close it; typing closes it too and the text goes on in the editor, so a follow-up never
- * needs a key first.
+ * needs a key first. The wheel (a swipe) scrolls it.
  */
 export class Reader {
 	private offset = 0;
@@ -266,6 +295,8 @@ export class Reader {
 		private readonly md: MarkdownRenderer = plainText,
 		/** Typing in the reader: it has closed, and `text` belongs in the editor. */
 		private readonly type?: (text: string) => void,
+		/** Whether Pi reports the mouse for this reader. */
+		private readonly mouse: () => boolean = () => false,
 	) {}
 
 	/** Where the latest question starts: the reader opens there, like a conversation opens at its end. */
@@ -279,6 +310,7 @@ export class Reader {
 			this.latestStart = out.length;
 			out.push(...wrap(this.theme.fg("accent", `? ${turn.question}`), inner));
 			out.push("");
+			for (const step of turn.steps ?? []) out.push(truncateToWidth(this.theme.fg("dim", step), inner, "…"));
 			out.push(...this.md(turn.answer, inner).map((line) => line.replace(/\s+$/u, "")));
 			out.push(...wrap(this.theme.fg("dim", turn.detail), inner));
 			out.push("");
@@ -299,7 +331,8 @@ export class Reader {
 		const view = all.slice(this.offset, this.offset + height);
 		const border = (s: string) => this.theme.fg("borderMuted", s);
 		const title = " aside ";
-		const out = [border("╭─") + this.theme.fg("muted", title) + border(`${"─".repeat(Math.max(0, width - 3 - title.length))}╮`)];
+		const close = this.mouse() && width >= 20 ? ` ${CLOSE_MARK} ─` : "";
+		const out = [border("╭─") + this.theme.fg("muted", title) + border("─".repeat(Math.max(0, width - 3 - title.length - close.length))) + this.theme.fg("dim", close) + border("╮")];
 		for (const line of view) {
 			const text = truncateToWidth(line, width - 4);
 			out.push(`${border("│")} ${text}${" ".repeat(Math.max(0, width - 4 - visibleWidth(text)))} ${border("│")}`);
@@ -334,6 +367,22 @@ export class Reader {
 			}
 		}
 		this.requestRender();
+	}
+
+	/** The wheel, or a swipe on a touch screen, scrolls the reader (Pi's fullscreen mode reports it). */
+	handleMouse(event: { type: string; wheelDelta?: number; button?: string; width?: number; x?: number; y?: number }): { handled: true } | undefined {
+		if (event.type === "wheel") {
+			this.offset = Math.max(0, this.offset + (event.wheelDelta ?? 0));
+			return { handled: true };
+		}
+		if (this.mouse() && event.width !== undefined && event.width >= 20 && event.y === 0 && event.button === "left") {
+			const [from, to] = closeZone(event.width);
+			if (event.x !== undefined && event.x >= from && event.x <= to && (event.type === "press" || event.type === "click")) {
+				if (event.type === "click") this.done();
+				return { handled: true };
+			}
+		}
+		return undefined;
 	}
 
 	invalidate(): void {}

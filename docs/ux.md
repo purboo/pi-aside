@@ -1,7 +1,11 @@
 # pi-aside: interaction design
 
-Status: implemented, revision 7 (§3.2: the panel grows with its answer, ctrl+o belongs to it only where it is printed, an open panel means a follow-up and the hint says so, typing in the reader goes on in the editor). Revision 6 (§3.2: the panel is never an empty box, renders Markdown, and an Enter on an empty editor puts it away). Revision 5 (§4: Enter is routed through Pi's `input` event, and the ghost text is a line below the editor; §3.2: an answer still streaming does not collapse; see `implementation.md` §2). Revision 4: busy includes waiting for subagents (§3.1, §3.8), and follow-ups see the latest main state (§3.2). This document covers only what the user sees and does. The engine in `design.md`
-(observation, T0/T1, C1–C3, routing, accounting) changes in two places only: follow-ups fork again when the main session has moved (§3.2), and a fork-point breakpoint is proposed (§5.5). Revision 1 is critiqued in §7.
+Status: implemented, revision 8. The panel is a small window: Esc or its close mark closes it; a wheel or
+swipe over it scrolls it. Empty Enter and sending a message to the agent leave it alone. Side tasks can use the
+session's callable tools, through Pi's own validation and permission hooks (§3.9). Revision 7 introduced room,
+follow-ups and the reader; revision 6 introduced progress and Markdown; revision 5 moved routing to Pi's `input`
+event. This document describes the current behavior. The engine in `design.md` remains the cache-checked fork;
+implementation changes and departures are recorded in `implementation.md`. §7 records earlier design mistakes.
 
 ## 1. The goal
 
@@ -9,10 +13,10 @@ Status: implemented, revision 7 (§3.2: the panel grows with its answer, ctrl+o 
 
 In practice this means five rules:
 1. **Change nothing that already works.** Fix only the moment that hurts.
-2. **No new keys, no new words.** Reuse what Pi users already know: Enter, Alt+Enter, Esc and Tab, each with the
-   meaning Pi already gives it. Never show `tier`, `cache` or `fork` on the normal path.
-3. **No modes.** A key means the same thing whatever is on screen. Anything that changes what Enter does must be
-   visible *before* the user commits.
+2. **Use familiar interactions.** Enter sends, Tab accepts a suggestion, Esc closes what is in front. A wheel or
+   swipe scrolls the content underneath it. Never show `tier`, `cache` or `fork` on the normal path.
+3. **Show the destination.** Opening a panel does not silently capture normal messages. Anything that changes
+   what Enter does must be visible *before* the user commits.
 4. **Lossless recovery over prediction.** When the system has to guess, a wrong guess must cost about two
    keystrokes and lose no text.
 5. **Guesses only fall back to Pi.** The user opens the side path with their own punctuation. The system may
@@ -79,57 +83,58 @@ question mark is a steer, exactly as today.
   `?`. To ask the agent itself, the user presses Alt+Enter.
 - People already put `?` on questions, so the rule is learned by using it, not by reading about it.
 
-### 3.2 The answer sits above the editor and never takes focus
+### 3.2 The answer is a small window above the editor
 
 ```text
- │ ● editing src/adapter.ts                         ← main session keeps streaming
- │
- │ ╭─ why did it pick B? ─────────────────────────╮
- │ │ A touches three callers; B stays inside the   │  ← widget (aboveEditor),
- │ │ adapter and keeps the retry logic intact.▌    │    not focusable
- │ ╰───────────────────────────────────────────────╯
- ├───────────────────────────────────────────────────┤
- │ █                                                 │  ← editor keeps every key
- └───────────────────────────────────────────────────┘
+ agent's conversation…                            ← wheel or swipe here: main conversation
+ ╭─ why did it pick B? ──────────────────── ✕ ─╮
+ │ B keeps the retry logic inside the adapter.   │  ← wheel or swipe here: aside
+ │ …                                            │
+ │ ↓ 12 more lines · ctrl+o                      │  ← click or tap: reader
+ ╰──────────────────────────────────────────────╯
+ editor…
 ```
 
-- **No focus, so no modes.** Esc still aborts the agent and Tab still completes. Enter still follows §3.1.
+- **Close what is in front.** Esc closes the panel. If the aside is still answering or running a tool, it is
+  cancelled; the main agent keeps going. With no panel open, Esc keeps Pi's behavior. The reader and Pi's own
+  dialogs or autocomplete close first when they own the input. A second Esc within 500 ms after an aside closes
+  is consumed to protect against double presses and key repeat; after that interval Esc can stop the agent.
+- **Touch and mouse.** In Pi's fullscreen mode, a close mark on the panel's top edge closes it. A wheel or swipe
+  over the panel scrolls the aside, including at its boundaries; it never falls through to the main conversation.
+  A wheel outside the panel keeps Pi's behavior. Clicking or tapping a count line opens the reader. The reader
+  also scrolls with the wheel and has a close mark. A mobile terminal must send mouse reports for these gestures;
+  regular mode leaves scrolling to the terminal and keeps the keyboard paths.
+- **Open or closed.** There is no folded line. An empty Enter and a message sent to the agent leave the panel
+  alone. The next aside replaces its contents, and switching sessions clears it. `/aside` rereads the latest
+  thread after the panel is closed.
 - **Follow-ups: open means continuing.** Another `?` message while the panel is open continues the same side
-  thread; once it is folded or cleared, the next one starts afresh. What is on screen is the state, and the hint
-  below the editor says which before Enter (§3.1). To start afresh, fold the panel first (Enter on the empty
-  editor). To continue a folded thread, open `/aside` and type: the reader closes, the panel opens again, and the
-  text goes on in the editor. A follow-up's panel shows only the new question, as its title, with one dim line
+  thread; once it is closed, the next one starts afresh. The hint below the editor says which before Enter
+  (§3.1). To continue a closed thread, open `/aside` and type: the reader closes, the panel opens again, and the
+  text goes on in the editor. A follow-up shows only the latest question, as its title, with one dim line
   `after: <the question before>`; the whole thread is in the reader.
-  That is how a conversation already works. If the main session has gained messages since the thread's last request (a
-  subagent report, a finished tool call, a steer), the follow-up is forked again from the latest observation,
-  and the earlier side exchange rides inside the new appended message as quoted context. A follow-up therefore
-  never answers from a stale snapshot. This amends `design.md` §4.5, which always continues
-  `T ++ G ++ Q ++ A1 ++ Q2`.
-- **Dismissal needs no key.** When the user next sends anything to the agent, the panel folds to one dim line
-  (`▸ why did it pick B?`). An answer still streaming stays open: the user is waiting for it. The next aside replaces it, and a session switch clears it.
-- **Putting it away by hand is the same Enter.** Enter on an empty editor sends nothing, so it folds the panel
-  the same way, and a second one clears the line (revision 6). While the editor is empty, the frame's lower edge
-  says `↵ folds` and the folded line `↵ clears`. `/aside` still rereads the thread.
-- **Never an empty box.** Before the first words, the panel shows Pi's spinner with `working` and the seconds so
-  far; once the model thinks, `thinking` and the last lines of its thinking, dim. Answers render as Markdown.
-  On models that take effort changes mid-conversation, an aside thinks at a low effort, which keeps the cache
-  (`implementation.md` §2.6), so its first words come sooner.
-- **Long answers need no key to be read.** The panel grows with its answer, up to half the screen while the
-  agent runs (its work stays in view) and up to the room above the editor otherwise (revision 7). A longer
-  answer shows its end while it streams and its start once it is done, since people read from the top, with one
-  line counting the rest: `↓ 12 more lines · ctrl+o`.
-- **A key belongs to the panel only where the panel prints it.** On that count line, Pi's own "more" key opens the
-  whole thread in the reader. Everywhere else, the folded line included, ctrl+o keeps Pi's meaning (tool output):
-  a panel the user is done with must not take a key away.
-- **The reader.** `/aside` with no argument (or ctrl+o on a count line) opens the latest thread in a reader
-  overlay, at the latest question. Esc, Enter and ctrl+o close it. Typing closes it too and the text goes on in
-  the editor, with the panel open again, so a follow-up is just typed; the one modal never traps the user.
-- Read-only tools run silently. A dim line such as `reading src/adapter.ts` appears while one runs.
-- **The session does not fork.** The side thread is an in-memory continuation of the main request
-  (`design.md` §4.2: `T ++ G ++ Q`, where G is what the branch gained since the observed request). It sees the
-  conversation up to the last completed message, not the reply still streaming. Nothing appears in `/tree`, the
-  transcript or the model context. The session file gains one usage entry per aside request, written once the
-  agent is idle (`design.md` §4.6). A session switch discards the thread.
+  If the main session gained messages since the last request (a report, finished tool, or steer), the follow-up
+  forks again from the latest observation and quotes the earlier side exchange in its appended message. This
+  amends `design.md` §4.5, which always continues `T ++ G ++ Q ++ A1 ++ Q2`.
+- **Never an empty box.** Before the first words the panel shows Pi's spinner with `working` and elapsed seconds;
+  while the model thinks, `thinking` with its last lines of thinking, dim. Answers render as Markdown. Models
+  that take effort changes mid-conversation use low effort when the cache proof permits it (`implementation.md`
+  §2.6).
+- **Long answers.** The panel grows up to half the screen while the agent runs and up to the room above the
+  editor otherwise. Before the user scrolls, a long answer shows its end while streaming and its start once done,
+  with a count of the lines outside the view. Scrolling holds that position; reaching the end of a streaming
+  answer follows it again. A new question resets the position.
+- **A key belongs to the panel only where it is printed.** Where the count line shows `ctrl+o`, Pi's "more" key
+  opens the reader. Everywhere else it keeps Pi's meaning (tool output).
+- **The reader.** `/aside`, ctrl+o on a count line, or a click on that line opens the latest thread at its latest
+  question. Esc, Enter, ctrl+o, or its close mark closes it. Typing closes it too and goes on in the editor, with
+  the panel open again; a follow-up never needs an extra key first.
+- **Tools.** A dim activity line shows the current tool call. Finished shell, edit and write calls leave one
+  concise step, such as `✓ $ du -sh ~/.cache` or `✓ write notes/feedback.md`; failures have `✗`. The steps also
+  appear in the reader. Tools and their permission behavior are described in §3.9.
+- **No session branch.** The side exchange and its tool results remain in memory; nothing is added to `/tree`
+  or the main model context. The session file receives usage accounting when the agent is idle. Tools can still
+  change shared files or external state, and session-bound extension tools can affect the main session: a side
+  conversation is not an isolated filesystem or a sandbox. A session switch cancels the aside and discards it.
 
 ### 3.3 Handing off is ghost text
 
@@ -154,7 +159,7 @@ knows from shells and IDEs: dim suggested text that Tab accepts.
 
 This also covers a wrong guess. `isn't foo.ts generated?` is a correction phrased as a question. It goes to the
 side, gets an answer within seconds, and comes back as a sharper steer through Tab and Enter, with no lost text.
-Esc still stops the agent at once if something urgent happens meanwhile.
+Esc closes an open aside first; once it is closed and the 500 ms double-press guard has elapsed, Esc stops the agent.
 
 ### 3.4 The route check
 
@@ -164,10 +169,11 @@ second lets the agent keep doing harm. These are the only misroutes that cost mo
 
 The aside request itself answers the routing question, so no extra request is needed:
 - The notice appended to the question asks the model to start with one hidden line, `route: side` or
-  `route: agent`. `agent` means the user is asking the agent to do, stop or change something. The model sees the
-  whole conversation, including what the agent is doing, so it judges this much better than any word list. The
+  `route: agent`, before tools that can act. `agent` means a request to change or stop the main agent's current
+  work. Independent tasks, such as checking disk space or writing a feedback note, stay on the side. The model
+  sees the conversation, including what the agent is doing. The
   notice lives in the appended message, not in tools or system, because those are part of the cached prefix.
-- `route: side` (the usual case) shows the answer as in §3.2.
+- `route: side` answers or carries out the independent task on the side (§3.2, §3.9).
 - While waiting (§3.1), `route: agent` sends the text as a prompt, which starts a turn: again Pi's meaning.
 - `route: agent` stops the aside and sends the user's original text as a steer, which is what Enter would have
   done without pi-aside. The panel shows one line:
@@ -184,7 +190,8 @@ The aside request itself answers the routing question, so no extra request is ne
   `side` is the case of §5.2.
 - Delay: the route line arrives with the first tokens of a cache-read request, usually within one or two seconds.
   A steer waits for the end of the current turn anyway, so the added delay is usually hidden in that wait.
-- Esc remains the brake. It aborts the agent at once, as in Pi.
+- No tool runs before an explicit `side` route; an `agent` route ends the aside before tools. Cancelling
+  a request never forwards its partial route line. Esc follows the window behavior in §3.2.
 
 ### 3.5 Money is shown only when it is news
 
@@ -208,14 +215,16 @@ The aside request itself answers the routing question, so no extra request is ne
 | Ask without derailing | The `?` you already type |
 | Ask while subagents run | The same `?`: waiting counts as busy (§3.1, §3.8) |
 | Ask when idle | `/aside …`, found through `/` completion |
-| Read the codebase | Read-only tools, run silently |
+| Read, inspect disk space, or write a note | The session's callable tools (§3.9) |
 | Act on the answer | Ghost text, then Tab and Enter |
-| Requests and corrections that end in `?` | The route check sends them to the agent |
+| Requests about the main agent's work ending in `?` | The route check sends them to the agent |
 | Recover from a wrong guess | Same ghost text |
 | Read a long answer | The panel grows; ctrl+o on its count line opens the reader |
-| Reread or scroll | `/aside` |
-| Continue or start afresh | Open panel continues, folded starts afresh; the hint says which |
-| Stop the agent | Esc, unchanged |
+| Scroll | Wheel or swipe over the panel or reader (fullscreen) |
+| Reread | `/aside` |
+| Close the aside | Esc or its close mark |
+| Continue or start afresh | Open panel continues, closed starts afresh; the hint says which |
+| Stop the agent | Esc once the aside is closed and the double-press guard has elapsed |
 | Cheap answers | The engine, invisible |
 | Cost accounting | Pi's footer, unchanged |
 | Settings | None (A4) |
@@ -224,14 +233,15 @@ The aside request itself answers the routing question, so no extra request is ne
 
 | Key | Meaning | New? |
 |---|---|---|
-| Enter | Send. While busy, a question-mark ending asks on the side (or follows up, while the panel is open) unless the route check finds a request or correction (shown before sending). On an empty editor, fold the aside panel, then clear it (`↵ folds`, `↵ clears`) | Extended, visibly |
+| Enter | Send. While busy, a question-mark ending asks on the side (or follows up while the panel is open), subject to the route check. Empty Enter leaves the panel alone | Extended, visibly |
 | Alt+Enter | Queue a follow-up | Pi |
-| Esc | Abort the agent; close the reader overlay | Pi |
+| Esc | Close the reader or panel in front; with no aside open, Pi's abort after the 500 ms double-press guard | Window behavior |
+| Wheel or swipe | Scroll the panel or reader underneath it; outside, Pi's scrolling | Fullscreen mouse input |
+| Click or tap on ✕ | Close the panel or reader | Fullscreen mouse input |
+| Click or tap on a count line | Open the reader | Fullscreen mouse input |
 | Typing in the reader | Closes it; the text goes on in the editor | Natural |
-| Tab | Autocomplete, which now also accepts the handoff ghost text in an empty editor | Pi |
-| ctrl+o | Show more: Pi's tool output; where the panel prints `↓ 12 more lines · ctrl+o`, the whole aside | Pi, extended only where printed |
-
-Revision 1 had Tab with three meanings, Esc meaning "dismiss", and a focus mode. Revision 2 has no new key.
+| Tab | Autocomplete, also accepts the handoff ghost text in an empty editor | Pi |
+| ctrl+o | Show more: Pi's tool output; where printed in the panel, the whole aside | Pi, extended only where printed |
 
 ### 3.8 Waiting for subagents
 
@@ -240,10 +250,27 @@ Revision 1 had Tab with three meanings, Esc meaning "dismiss", and a focus mode.
 - **The thread follows the main session.** After the report's turn, the next `?` follow-up is forked again from
   the latest state (§3.2), so it sees the report.
 - **What the aside cannot see.** It knows the main conversation and the files. It does not see a subagent's live
-  progress: `subagents` is not one of the read-only built-ins, so a call gets "not available in an aside"
-  (`design.md` §4.4). It answers from the last status in the conversation and says how old that is. `/subagents`
-  remains the place to watch them. Letting an extension declare read-only calls (such as `status`) to the aside
-  is possible later; it is not part of this design.
+  progress: `subagents` may be declared `model-only`, which Pi does not make callable from another tool
+  (§3.9). When unavailable, the aside answers from the last status in the conversation and says how old it is.
+  `/subagents` remains the place to watch them.
+
+### 3.9 Independent tasks and tools
+
+An aside can inspect disk usage with `bash`, write feedback with `write`, and use the session's callable extension
+tools. It does not add a separate approval flow: calls go through Pi's validation and existing tool hooks. Tool
+overrides and configured shell behavior therefore apply. Inactive tools stay unavailable; Pi's `model-only`
+tools are not callable through its nested-tool API. That API also needs an existing main assistant response; a
+blank session cannot execute side tools before the main agent has answered once. No fallback runs an unwrapped
+built-in tool to bypass a block.
+
+The routing boundary is the main agent's current task, not whether the message is a question or a request.
+`/aside <task>` chooses the side explicitly. While busy, a `?` message uses the route check. An ordinary message
+without `?` still goes to the main agent; opening the panel does not capture Enter.
+
+The model is told to leave the main agent's files and processes alone. This is guidance, not a lock: both agents
+share the workspace, and tools can have external effects. Closing stops further work and requests cancellation of
+an in-flight tool; it cannot undo a completed edit or delete. Tool failures are shown to the aside as failures,
+not as successful actions. At most 24 model/tool rounds run for one question.
 
 ## 4. Feasibility (Pi extension API, checked in `dist/core/extensions/types.d.ts`)
 
@@ -252,10 +279,11 @@ Revision 1 had Tab with three meanings, Esc meaning "dismiss", and a focus mode.
 | The route check's fallback steer | `pi.sendUserMessage` with steer delivery, as in `design.md` §4.7 |
 | The waiting state (§3.1) | `pi.events` (`emit`, `on`; `dist/core/event-bus.d.ts`); one emitter in pi-durable-subagents |
 | Route a submitted text that ends in `?` while the agent runs | Pi's `input` event (`handled` or `continue`; `streamingBehavior` tells a steer from a follow-up), `ctx.isIdle()`. Implemented this way instead of intercepting the key, so a remapped submit key, bracketed paste and IME need no special handling |
-| Tab on an empty editor with a pending handoff; refreshing the hint | `ctx.ui.onTerminalInput` (returns `consume`), `getEditorText` |
+| Esc for the panel; Tab on an empty editor with a pending handoff; refreshing the hint | `ctx.ui.onTerminalInput` (returns `consume`), `getEditorText` |
 | The hint below the editor and the panel above it | `ctx.ui.setWidget(key, …, { placement })` |
 | Accept the handoff | `ctx.ui.setEditorText` |
 | Reader overlay | `ctx.ui.custom(…, { overlay: true })` |
+| Panel/reader wheel, close and more targets | Component `handleMouse` in Pi fullscreen mode |
 | The handoff's side note | `pi.sendMessage` (custom message), delivered with the user's message |
 
 Ghost text drawn *inside* the editor would need `setEditorComponent`, which conflicts with other editor
@@ -271,11 +299,11 @@ only while the editor is empty.
    handoff (§3.3). Measurement: how often a `?` aside is followed within 30 s by a handoff or by a steer with
    similar text. If that happens in more than 15 % of asides over a week of real use, the rule becomes opt-in, and
    the hint offers the side instead (key decided then). A correction misrouted this way lets the agent keep going
-   until the user hands off or presses Esc. A steer does not stop the agent at once either, because it lands after
-   the current turn, and Esc is the real brake in both cases. This is the one misroute that does harm.
+   until the user hands off or closes the aside and then stops the agent. A steer does not stop the agent at once either, because it lands after
+   the current turn; Esc first closes the visible aside, then can stop the agent. This is the one misroute that does harm.
    Measurement: an Esc within 10 s of a `side` aside. Before release, a fixed set of 40 messages (English and
    Chinese requests, corrections and questions, from real sessions) must route with no `side` error on a request
-   or correction. If real use shows users getting burned, the rule becomes opt-in regardless of the 15 % figure.
+   or correction about the main agent's work. If real use shows users getting burned, the rule becomes opt-in regardless of the 15 % figure.
 3. **Discovery depends on typing a question mark.** Users who never end a question with `?` or `？` (common in
    Chinese chat) never see the hint. They keep Pi's behaviour and can use `/aside`. Matching words such as `吗`
    (a Chinese question particle) was rejected: word lists are per language, and `吧` or `呢` often end requests.
@@ -300,21 +328,26 @@ only while the editor is empty.
 | ID | Assertion | Method |
 |---|---|---|
 | U1 | Untaught use: three Pi users who were not told about pi-aside get a side answer and act on it in a scripted scenario | Observed session; no hints from the observer |
-| U2 | No key changes meaning based on what is on screen; Esc aborts the agent with the panel visible | Key replay |
+| U2 | Esc closes an open panel, cancelling only the aside; a rapid second Esc does not stop the agent; a later Esc keeps Pi's behavior | Key replay |
 | U3 | The hint below the editor is present exactly when Enter will ask on the side | Snapshot plus key replay |
 | U4 | Normal-path screens contain no tier, cache, token or price text | Snapshot |
 | U5 | Nothing reaches the main session without the user's Enter; a handoff adds exactly one custom message | Capture server plus session file |
 | U6 | Paste, IME and a remapped submit key behave as without pi-aside | Key replay |
 | U7 | Misroute rates are logged locally (§5.1, §5.2) | Usage note field |
-| U8 | Route check: the 40-message set routes with no `side` error on a request or correction; an aside failure before the route line sends a steer | Fixture set against the capture server; injected failure |
+| U8 | Route check: the 40-message set routes with no `side` error on a request or correction about the main task; an aside failure before the route line sends a steer | Fixture set against the capture server; injected failure |
 | U9 | Question-mark detection: `?`, `？`, `؟` and U+037E qualify after trailing whitespace, brackets and quotes; an end inside a code fence does not; `吗` without a mark does not | Unit fixtures |
 | U10 | Waiting: with a pi-durable-subagents workflow pending and Pi idle, a `?` message shows the hint, asks on the side and starts no turn; a report during the aside starts its turn at once; the next `?` sees the report; the count returns to zero when the last workflow ends, and the hint disappears | Scripted session with a stub workflow |
 
-## 7. Why revision 1 was not good enough
+| U11 | A wheel or swipe over the panel scrolls it, including at its boundaries; tap close/more works in fullscreen; the reader also scrolls | Mouse-event replay in real Pi |
+| U12 | Independent tasks run callable tools with validation and permission hooks; a cancelled aside never forwards or starts later tool calls | Capture server, tool fixtures and cancellation regressions |
+
+## 7. Earlier design mistakes (historical)
 
 Revision 1 was designed without checking Pi's keymap:
-- **It collided with Pi.** Esc is `app.interrupt`, so "Esc hides the note" would have taken over the user's way to
-  stop the agent. Tab is autocomplete.
+- **We overvalued an unchanged keymap.** Revisions 2–7 reserved Esc for interrupting the agent even with a
+  framed aside visible. In actual use people repeatedly pressed Esc to close the window and stopped their main
+  work instead. Revision 8 follows that expectation: close what is in front first, with a double-press guard.
+  Tab still belongs to autocomplete.
 - **It broke its own rule.** Tab meant ask, reopen and hand off. Two Tabs could send something to the main
   session.
 - **It had a silent wrong destination.** While a note was open, Enter went to the aside. A steer typed then

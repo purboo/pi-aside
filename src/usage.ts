@@ -1,5 +1,5 @@
-// Accounting (docs/design.md §4.6): one Pi usage entry per aside request, written only while the main agent is
-// idle, because a usage entry advances the session leaf.
+// Accounting (docs/design.md §4.6): Pi usage entries for aside requests and tool results, written only while the
+// main agent is idle, because a usage entry advances the session leaf.
 
 export interface QueuedUsage {
 	sessionId: string;

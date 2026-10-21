@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+- Esc closes the aside panel and cancels its work while the main agent keeps going. A quick second Esc is
+  ignored for 500 ms; with no aside open, Esc keeps Pi's behavior. Autocomplete and focused dialogs close first.
+- In fullscreen mode, a wheel or swipe over the panel scrolls the aside, even at its boundaries. A close mark
+  works by click or tap, and clicking a “more lines” count opens the reader. The reader also scrolls and closes
+  by touch or mouse. Keyboard paths remain available in regular mode.
+- The panel has open and closed states. Empty Enter and messages sent to the agent leave it open; the folded
+  line and its Enter hints are gone. An open panel continues its thread; after closing, a question starts afresh.
+- Independent tasks can use the session's callable tools, including shell commands, file edits and extension
+  tools, through Pi's argument validation and permission hooks. Disabled tools stay disabled; Pi's `model-only`
+  tools are not callable through its nested-tool API. No separate confirmation flow is added.
+- The route check distinguishes changes to the main agent's current task from independent side tasks. An
+  explicit `side` route is required before tools that can act. Cancelled and replaced requests never forward
+  a partial route or run later calls.
+- Finished shell, edit and write calls leave concise steps in the panel and reader. A question can use up to
+  24 model/tool rounds. Closing cancels further work; completed changes are not undone.
+- Costs reported by extension tools are counted once, including nested calls and paid results after cancellation.
+
 ## 0.3.0
 
 - The panel grows with its answer instead of stopping at 10 lines: up to half the screen while the agent runs, so
