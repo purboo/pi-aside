@@ -1,6 +1,6 @@
 # pi-aside: interaction design
 
-Status: implemented, revision 5 (§4: Enter is routed through Pi's `input` event, and the ghost text is a line below the editor; §3.2: an answer still streaming does not collapse; see `implementation.md` §2). Revision 4: busy includes waiting for subagents (§3.1, §3.8), and follow-ups see the latest main state (§3.2). This document covers only what the user sees and does. The engine in `design.md`
+Status: implemented, revision 6 (§3.2: the panel is never an empty box, renders Markdown, and an Enter on an empty editor puts it away). Revision 5 (§4: Enter is routed through Pi's `input` event, and the ghost text is a line below the editor; §3.2: an answer still streaming does not collapse; see `implementation.md` §2). Revision 4: busy includes waiting for subagents (§3.1, §3.8), and follow-ups see the latest main state (§3.2). This document covers only what the user sees and does. The engine in `design.md`
 (observation, T0/T1, C1–C3, routing, accounting) changes in two places only: follow-ups fork again when the main session has moved (§3.2), and a fork-point breakpoint is proposed (§5.5). Revision 1 is critiqued in §7.
 
 ## 1. The goal
@@ -102,9 +102,18 @@ question mark is a steer, exactly as today.
   `T ++ G ++ Q ++ A1 ++ Q2`.
 - **Dismissal needs no key.** When the user next sends anything to the agent, the panel collapses to one dim line
   (`▸ why did it pick B?`). An answer still streaming stays expanded: the user is waiting for it. The next aside replaces it, and a session switch clears it.
+- **Putting it away by hand is the same Enter.** Enter on an empty editor sends nothing, so it collapses the panel
+  the same way, and a second one clears the line (revision 6). While the editor is empty, the frame's lower edge
+  says `↵ hides`. `/aside` still rereads the thread.
+- **Never an empty box.** Before the first words, the panel shows Pi's spinner with `working` and the seconds so
+  far; once the model thinks, `thinking` and the last lines of its thinking, dim. Answers render as Markdown.
+  On models that take effort changes mid-conversation, an aside thinks at a low effort, which keeps the cache
+  (`implementation.md` §2.6), so its first words come sooner.
 - **Long answers.** While streaming, the panel shows the last 10 lines. When the answer is done, it shows the
-  first 10 lines and `… /aside to read all`. `/aside` with no argument opens the latest aside in a reader overlay.
-  The reader is an explicit modal with its own footer, and Esc closes it, as in every Pi selector.
+  first 10 lines and `… ctrl+o more`: Pi's own "more" key expands the aside with everything else (revision 6),
+  up to the terminal's room, and reopens a collapsed panel. Beyond that, `… /aside to read all`. `/aside` with no argument opens the latest aside in a reader overlay.
+  The reader is an explicit modal with its own footer, opens at the latest question, and Esc closes it, as in
+  every Pi selector.
 - Read-only tools run silently. A dim line such as `reading src/adapter.ts` appears while one runs.
 - **The session does not fork.** The side thread is an in-memory continuation of the main request
   (`design.md` §4.2: `T ++ G ++ Q`, where G is what the branch gained since the observed request). It sees the
@@ -203,10 +212,11 @@ The aside request itself answers the routing question, so no extra request is ne
 
 | Key | Meaning | New? |
 |---|---|---|
-| Enter | Send. While busy, a question-mark ending asks on the side unless the route check finds a request or correction (shown before sending) | Extended, visibly |
+| Enter | Send. While busy, a question-mark ending asks on the side unless the route check finds a request or correction (shown before sending). On an empty editor, put the aside panel away (`↵ hides` on its frame) | Extended, visibly |
 | Alt+Enter | Queue a follow-up | Pi |
 | Esc | Abort the agent; close the reader overlay | Pi |
 | Tab | Autocomplete, which now also accepts the handoff ghost text in an empty editor | Pi |
+| ctrl+o | Show more: Pi's tool output, and now the aside panel too | Pi |
 
 Revision 1 had Tab with three meanings, Esc meaning "dismiss", and a focus mode. Revision 2 has no new key.
 

@@ -39,6 +39,13 @@ export interface TurnView {
 	error?: string;
 	/** A dim activity line, such as `reading src/a.ts`. */
 	activity?: string;
+	/** The model's (summarized) thinking in the current request, while no answer text has arrived. */
+	thinking?: string;
+	/** When the question was asked, and when the answer's first text arrived (ms since the epoch). */
+	startedAt: number;
+	firstTextAt?: number;
+	/** The thinking level the aside used, when lower than the main session's. */
+	effort?: string;
 	tier?: Tier;
 	reason?: string;
 	cost: number;
@@ -64,6 +71,14 @@ function textOf(message: Any): string {
 		.filter((c: Any) => c?.type === "text")
 		.map((c: Any) => c.text)
 		.join("");
+}
+
+function thinkingOf(message: Any): string {
+	if (!message || !Array.isArray(message.content)) return "";
+	return message.content
+		.filter((c: Any) => c?.type === "thinking" && typeof c.thinking === "string")
+		.map((c: Any) => c.thinking)
+		.join("\n\n");
 }
 
 function activityFor(call: Any): string {
@@ -140,7 +155,7 @@ export class AsideThread {
 
 	/** Ask a question in this thread. Resolves when the answer is complete, failed or aborted. */
 	async ask(question: string, options: { routeCheck: boolean; onRoute?: (route: "side" | "agent") => void }): Promise<TurnView> {
-		const turn: TurnView = { question, raw: "", done: false, cost: 0, read: 0, written: 0 };
+		const turn: TurnView = { question, raw: "", done: false, startedAt: Date.now(), cost: 0, read: 0, written: 0 };
 		this.turns.push(turn);
 		const controller = new AbortController();
 		this.controller = controller;
@@ -175,6 +190,7 @@ export class AsideThread {
 			const fork = this.fork!;
 			turn.tier = fork.tier;
 			turn.reason = fork.reason;
+			turn.effort = fork.effort;
 			turn.predicted = fork.observation?.cacheablePrefix;
 			const q = {
 				role: "user",
@@ -188,6 +204,8 @@ export class AsideThread {
 				const result: SendResult = await send(this.host.env, fork, [...this.exchange, ...added], signal, (event: Any) => {
 					if (event?.partial) {
 						turn.raw = textBefore + textOf(event.partial);
+						turn.thinking = thinkingOf(event.partial) || undefined;
+						if (turn.firstTextAt === undefined && turn.raw.trim() !== "") turn.firstTextAt = Date.now();
 						reportRoute();
 						update();
 					}
@@ -195,6 +213,8 @@ export class AsideThread {
 				const message = result.message;
 				turn.tier = result.tier;
 				turn.reason = result.reason ?? turn.reason;
+				turn.effort = fork.effort;
+				turn.thinking = undefined;
 				this.account(fork, result, turn);
 				added.push(message);
 				turn.raw = textBefore + textOf(message);
@@ -231,6 +251,7 @@ export class AsideThread {
 		} finally {
 			turn.done = true;
 			turn.activity = undefined;
+			turn.thinking = undefined;
 			if (this.controller === controller) this.controller = undefined;
 			reportRoute();
 			update();

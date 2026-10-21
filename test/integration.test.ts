@@ -28,6 +28,7 @@ interface Done {
 	predicted?: number;
 	answer: string;
 	error?: string;
+	effort?: string;
 	aborted: boolean;
 }
 
@@ -38,12 +39,23 @@ async function asideDone(p: PiRpc, skip = 0): Promise<Done> {
 
 const LIST: Record<ApiName, string> = { anthropic: "messages", responses: "input", completions: "messages" };
 
-function expectExtends(api: ApiName, aside: Record<string, unknown>, main: Record<string, unknown>) {
+/** E with every effort set to `level`: the aside's own trailing configuration (fork.ts `asideLevel`). */
+function withEffort(config: unknown[], level: string): unknown {
+	return JSON.parse(JSON.stringify(config).replace(/"effort":"[a-z]+"/g, `"effort":"${level}"`));
+}
+
+function expectExtends(api: ApiName, aside: Record<string, unknown>, main: Record<string, unknown>, effort?: string) {
 	const apiId = PROVIDERS[api].api;
 	const a = splitList(apiId, aside)!;
 	const m = splitList(apiId, main)!;
 	expect(extendsList(a.core, m.core)).toBe(true);
-	expect(strip(a.config)).toEqual(strip(m.config));
+	if (effort) {
+		expect(m.config.length).toBeGreaterThan(0);
+		expect(strip(a.config)).toEqual(strip(withEffort(m.config, effort)));
+		expect(JSON.stringify(m.config)).not.toContain(`"effort":"${effort}"`);
+	} else {
+		expect(strip(a.config)).toEqual(strip(m.config));
+	}
 	for (const key of new Set([...Object.keys(aside), ...Object.keys(main)])) {
 		if (key === LIST[api]) continue;
 		expect([key, strip(aside[key])]).toEqual([key, strip(main[key])]);
@@ -127,7 +139,9 @@ for (const c of CASES) {
 			expect(done.tier).toBe("exact");
 			const [main, aside] = server.requests;
 			expect(aside!.at).toBeGreaterThanOrEqual(releasedAt);
-			expectExtends(c.api, aside!.body, main!.body);
+			// Models that take effort changes mid-conversation answer at a low effort: only E differs.
+			expectExtends(c.api, aside!.body, main!.body, c.model ? "low" : undefined);
+			expect(done.effort).toBe(c.model ? "low" : undefined);
 			expect(JSON.stringify(aside!.body)).not.toContain("One two");
 			await pi.waitForAgentEnd(1);
 			// The usage entry waits for idle.

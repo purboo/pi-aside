@@ -223,12 +223,27 @@ export function checkC2(api: string, b0: Payload, b1: Payload, p: Payload): Chec
 	return ok;
 }
 
-/** C3, on the bytes sent: F's top-level fields equal P's, and strip(core(F)) extends strip(core(P)). */
-export function checkC3(api: string, f: Payload, p: Payload): CheckResult {
+/**
+ * Whether two dry conversions of the same transcript differ only in their trailing configuration items E: the same
+ * core and the same other top-level fields. This is what proves that a lower aside effort keeps the cache prefix.
+ */
+export function differsOnlyInConfig(api: string, a: Payload, b: Payload): boolean {
+	const sa = splitList(api, a);
+	const sb = splitList(api, b);
+	if (!sa || !sb) return false;
+	if (!deepEqual(strip(sa.core), strip(sb.core))) return false;
+	return otherFieldsEqual(api, a, b) === undefined;
+}
+
+/**
+ * C3, on the bytes sent: F's top-level fields equal P's, and strip(core(F)) extends strip(core(P)). E(F) equals E(P),
+ * or `expectedConfig` when the aside runs at its own effort (proved by `differsOnlyInConfig` on the dry runs).
+ */
+export function checkC3(api: string, f: Payload, p: Payload, expectedConfig?: unknown[]): CheckResult {
 	const sf = splitList(api, f);
 	const sp = splitList(api, p);
 	if (!sf || !sp) return fail("no content list");
-	if (!deepEqual(strip(sf.config), strip(sp.config))) return fail("the trailing configuration differs from the observed request");
+	if (!deepEqual(strip(sf.config), strip(expectedConfig ?? sp.config))) return fail("the trailing configuration differs from the observed request");
 	if (!extendsList(sf.core, sp.core)) return fail("the request does not extend the observed request");
 	const field = otherFieldsEqual(api, f, p);
 	if (field) return fail(`\`${field}\` differs from the observed request`);

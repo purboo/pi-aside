@@ -14,7 +14,9 @@ import {
 	type Delta,
 	deepEqual,
 	diffTopLevel,
+	differsOnlyInConfig,
 	type Payload,
+	splitList,
 	T0_APIS,
 } from "./payload.ts";
 import { OWN_REQUEST } from "./tap.ts";
@@ -131,8 +133,12 @@ export interface Fork {
 		thinkingBudgets: unknown;
 		blockImages: boolean;
 	};
+	/** The thinking level the aside sends with, when lower than the main session's (see `asideLevel`). */
+	effort?: string;
 	/** T0 only. */
 	b0?: Payload;
+	/** T0 with `effort`: the dry run of T at the aside's effort; it differs from B0 only in E. */
+	b0e?: Payload;
 	delta?: Delta;
 	modelSnapshot?: Any;
 	/** Number of entries in the session branch when the fork was made. */
@@ -151,11 +157,36 @@ export interface SendResult {
 	sent?: Payload;
 }
 
-function baseOptions(env: ForkEnv, fork: Fork, model: Any, signal: AbortSignal | undefined): Any {
+/** The effort an aside asks for: quick answers, so its first words arrive soon. */
+export const ASIDE_LEVEL = "low";
+const LEVELS = ["minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * The thinking level for an aside: `ASIDE_LEVEL` when the main session's is higher and the model takes effort
+ * changes mid-conversation (`compat.supportsMidConvoEffort`: pi-ai sends the level as a trailing configuration item,
+ * after the cached prefix), otherwise the main session's level. A level the model maps to nothing is not used.
+ */
+export function asideLevel(model: Any, level: string | undefined): string | undefined {
+	if (!level || model?.compat?.supportsMidConvoEffort !== true) return level;
+	const map = model.thinkingLevelMap;
+	if (map && typeof map === "object" && (map[ASIDE_LEVEL] === null || (Object.keys(map).length > 0 && !(ASIDE_LEVEL in map)))) {
+		return level;
+	}
+	const i = LEVELS.indexOf(level);
+	return i > LEVELS.indexOf(ASIDE_LEVEL) ? ASIDE_LEVEL : level;
+}
+
+function baseOptions(
+	env: ForkEnv,
+	fork: Fork,
+	model: Any,
+	signal: AbortSignal | undefined,
+	reasoning: string | undefined = fork.effort ?? fork.recipe.reasoning,
+): Any {
 	const settings = env.settings();
 	const opts = requestOptions(settings);
 	return {
-		reasoning: fork.recipe.reasoning,
+		reasoning,
 		sessionId: fork.recipe.sessionId,
 		transport: fork.recipe.transport,
 		thinkingBudgets: fork.recipe.thinkingBudgets,
@@ -179,9 +210,15 @@ async function finish(stream: Any): Promise<Any> {
 }
 
 /** B0: the dry conversion of T; onPayload records the payload and aborts before any request is sent. */
-export async function dryRun(env: ForkEnv, fork: Fork, model: Any, messages: unknown[]): Promise<Payload> {
+export async function dryRun(
+	env: ForkEnv,
+	fork: Fork,
+	model: Any,
+	messages: unknown[],
+	reasoning: string | undefined = fork.recipe.reasoning,
+): Promise<Payload> {
 	let captured: Payload | undefined;
-	const options = baseOptions(env, fork, model, undefined);
+	const options = baseOptions(env, fork, model, undefined, reasoning);
 	options.onPayload = (payload: unknown) => {
 		captured = structuredClone(payload) as Payload;
 		throw new Fallback("dry run");
@@ -248,6 +285,19 @@ async function prepareExact(env: ForkEnv, observation: Observation, branchLength
 	fork.b0 = b0;
 	fork.delta = delta;
 	fork.pHash = await sha256(canonical(p));
+	// A lower effort is used only when the dry conversion proves that it changes nothing but E.
+	const lower = asideLevel(snapshot, recipe.reasoning);
+	if (lower !== recipe.reasoning) {
+		try {
+			const b0e = await dryRun(env, fork, structuredClone(snapshot), observation.transcript, lower);
+			if (differsOnlyInConfig(recipe.api, b0e, b0) && !deepEqual(b0e, b0)) {
+				fork.effort = lower;
+				fork.b0e = b0e;
+			}
+		} catch {
+			// the main session's level
+		}
+	}
 	return fork;
 }
 
@@ -312,11 +362,13 @@ export function makeRebuilt(env: ForkEnv, observation: Observation | undefined, 
 	}
 	const level = recipe?.reasoning ?? (env.thinkingLevel() === "off" ? undefined : env.thinkingLevel());
 	const settings = env.settings();
+	const lower = asideLevel(env.registry.find(provider, modelId), level);
 	return {
 		tier: "rebuilt",
 		reason,
 		base,
 		observation,
+		...(lower !== level ? { effort: lower } : {}),
 		recipe: {
 			provider,
 			modelId,
@@ -364,7 +416,9 @@ async function demote(
 	fork.tier = "rebuilt";
 	fork.reason = reason;
 	fork.recipe = rebuilt.recipe;
+	fork.effort = rebuilt.effort;
 	fork.b0 = undefined;
+	fork.b0e = undefined;
 	fork.delta = undefined;
 	return sendRebuilt(env, fork, messages, signal, onEvent);
 }
@@ -409,13 +463,13 @@ async function sendExact(
 			restart = true;
 			throw new Fallback("restart");
 		}
-		const c2 = checkC2(recipe.api, fork.b0!, b1 as Payload, p);
+		const c2 = checkC2(recipe.api, fork.b0e ?? fork.b0!, b1 as Payload, p);
 		if (!c2.ok) {
 			fallback = c2.reason;
 			throw new Fallback(c2.reason);
 		}
 		const f = applyDelta(b1 as Payload, fork.delta!);
-		const c3 = checkC3(recipe.api, f, p);
+		const c3 = checkC3(recipe.api, f, p, fork.b0e ? splitList(recipe.api, fork.b0e)?.config : undefined);
 		if (!c3.ok) {
 			fallback = c3.reason;
 			throw new Fallback(c3.reason);

@@ -42,8 +42,10 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | Alt+Enter | Pi's meaning: a follow-up. |
 | Another `?` message while the answer is shown | Continues the side conversation. |
 | Send anything to the agent | The answer collapses to one dim line. |
+| Enter on an empty editor | Puts the answer away: first to one dim line, then gone. The frame shows `↵ hides` while the editor is empty. |
+| ctrl+o (Pi's "more") | Expands a long answer, or reopens a collapsed one. Pi still toggles its tool output. |
 | `/aside <question>` | Asks on the side, busy or not. |
-| `/aside` | Opens the latest side conversation in a reader. Esc closes it. |
+| `/aside` | Opens the latest side conversation in a reader, at the latest question. Esc closes it. |
 | Tab on an empty editor when `⇥ suggestion` is shown | Accepts the aside's suggested instruction for the agent. Enter sends it, with the side Q&A attached as a note. |
 | Esc | Pi's meaning: aborts the agent. pi-aside never takes focus. |
 
