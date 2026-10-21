@@ -7,15 +7,17 @@ import { BackgroundWork } from "./busy.ts";
 import type { ForkEnv } from "./fork.ts";
 import { Observer, type Recipe } from "./observe.ts";
 import {
+	type HintKind,
 	type MarkdownRenderer,
 	MONEY_THRESHOLD,
-	PANEL_LINES,
+	type MoreAction,
 	type PanelState,
+	panelRoom,
+	panelView,
 	plainText,
 	Reader,
 	type ReaderTurn,
 	renderBelow,
-	renderPanel,
 	SPIN_MS,
 } from "./panel.ts";
 import { endsWithQuestionMark, routeEnter } from "./qmark.ts";
@@ -63,6 +65,8 @@ export default function piAside(pi: ExtensionAPI): void {
 	let panel: PanelState = { turns: [], collapsed: false };
 	let tuiRef: Any;
 	let panelShown = false;
+	/** What Pi's "more" key does while the panel's last render is on screen (it claims the key only there). */
+	let panelMore: MoreAction | undefined;
 	let belowShown = false;
 	let handoff: { text: string; note: string } | undefined;
 	let acceptedHandoff: { text: string; note: string } | undefined;
@@ -165,7 +169,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	function resetSession(ctx: ExtensionContext | undefined): void {
 		thread?.abort();
 		thread = undefined;
-		panel = { turns: [], collapsed: false, expanded: panel.expanded };
+		panel = { turns: [], collapsed: false };
 		handoff = undefined;
 		acceptedHandoff = undefined;
 		rebuiltInARow = 0;
@@ -289,15 +293,24 @@ export default function piAside(pi: ExtensionAPI): void {
 		};
 	}
 
+	/**
+	 * Whether the next question continues the current thread: exactly while its panel is open (docs/ux.md §3.2). A
+	 * folded or cleared panel means the user is done with it, and the next question starts afresh.
+	 */
+	function continues(): boolean {
+		const ctx = ctxRef;
+		if (!ctx || !thread || thread.turns.length === 0) return false;
+		if (panel.collapsed || panel.hidden || panel.sentToAgent) return false;
+		return thread.valid(observer, ctx.sessionManager.getSessionId());
+	}
+
 	async function startAside(question: string, options: { routeCheck: boolean }): Promise<TurnView | undefined> {
 		const ctx = ctxRef;
 		if (!ctx) return undefined;
-		const sessionId = ctx.sessionManager.getSessionId();
-		const continuing = thread && !panel.collapsed && !panel.sentToAgent && thread.valid(observer, sessionId);
-		if (!continuing) {
+		if (!continues()) {
 			thread?.abort();
 			thread = new AsideThread(threadHost());
-			panel = { turns: thread.turns, collapsed: false, expanded: panel.expanded };
+			panel = { turns: thread.turns, collapsed: false };
 		} else if (thread!.busy) {
 			thread!.abort();
 		}
@@ -437,6 +450,21 @@ export default function piAside(pi: ExtensionAPI): void {
 		});
 	}
 
+	/** Typing in the reader: the thread's panel opens again (so `?` follows up) and the text goes on in the editor. */
+	function typeFromReader(text: string): void {
+		if (thread && thread.turns.length > 0) {
+			panel.collapsed = false;
+			panel.hidden = false;
+		}
+		try {
+			ctxRef?.ui.pasteToEditor(text);
+		} catch {
+			// the editor is gone
+		}
+		renderNow();
+		setTimeout(refreshBelow, 0);
+	}
+
 	async function openReader(ctx: ExtensionContext): Promise<void> {
 		await ctx.ui.custom<void>(
 			(tui: Any, theme: Any, _keybindings: Any, done: (result: void) => void) =>
@@ -447,6 +475,7 @@ export default function piAside(pi: ExtensionAPI): void {
 					() => tui.requestRender(),
 					() => tui.terminal?.rows ?? process.stdout.rows ?? 40,
 					markdownRenderer(theme),
+					typeFromReader,
 				),
 			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center" } as Any },
 		);
@@ -488,20 +517,17 @@ export default function piAside(pi: ExtensionAPI): void {
 		ticker.unref?.();
 	}
 
-	/** ctrl+o (`app.tools.expand`): a collapsed panel opens again, expanded; otherwise expanded and compact toggle. */
-	function toggleMore(): void {
-		if (panel.collapsed && !panel.hidden && panel.turns.length > 0) {
-			panel.collapsed = false;
-			panel.expanded = true;
-		} else {
-			panel.expanded = !panel.expanded;
-		}
-		renderNow();
+	/**
+	 * Pi's "more" key (`app.tools.expand`, ctrl+o) where the open panel prints it: the long answer opens in the
+	 * reader. Everywhere else the key keeps Pi's meaning (its tool output).
+	 */
+	function more(_action: MoreAction): void {
+		if (ctxRef) void openReader(ctxRef);
 	}
 
 	/**
-	 * Enter on an empty editor puts the panel away (docs/ux.md §3.2): the frame collapses to one dim line, and the
-	 * next such Enter clears that line. The thread stays readable with `/aside`.
+	 * Enter on an empty editor puts the panel away (docs/ux.md §3.2): the frame folds to one dim line, and the next
+	 * such Enter clears that line. The thread stays readable with `/aside`.
 	 */
 	function putAway(): boolean {
 		if (panel.turns.length === 0 || panel.hidden) return false;
@@ -520,6 +546,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		panelShown = show;
 		try {
 			if (!show) {
+				panelMore = undefined;
 				ctx.ui.setWidget(PANEL_WIDGET, undefined);
 				return;
 			}
@@ -531,13 +558,15 @@ export default function piAside(pi: ExtensionAPI): void {
 					return {
 						render: (width: number) => {
 							const rows = tui?.terminal?.rows ?? process.stdout.rows ?? 40;
-							panel.maxLines = Math.max(PANEL_LINES, rows - 14);
+							panel.maxLines = panelRoom(rows, running());
 							try {
 								panel.moreKey = keyText("app.tools.expand") || undefined;
 							} catch {
 								panel.moreKey = undefined;
 							}
-							return renderPanel(panel, width, theme, md, Date.now());
+							const view = panelView(panel, width, theme, md, Date.now());
+							panelMore = view.more;
+							return view.lines;
 						},
 						invalidate() {},
 					};
@@ -549,21 +578,22 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 	}
 
-	function belowState(): { hint: boolean; ghost: string | undefined } {
+	function belowState(): { hint: HintKind; ghost: string | undefined } {
 		const ctx = ctxRef;
-		if (!ctx || ctx.mode !== "tui") return { hint: false, ghost: undefined };
+		if (!ctx || ctx.mode !== "tui") return { hint: undefined, ghost: undefined };
 		let text = "";
 		try {
 			text = ctx.ui.getEditorText();
 		} catch {
 			text = "";
 		}
-		const hint = routeEnter({ text, busy: busy(), key: "submit" }) === "side" && endsWithQuestionMark(text);
+		const side = routeEnter({ text, busy: busy(), key: "submit" }) === "side" && endsWithQuestionMark(text);
+		const hint: HintKind = side ? (continues() ? "follow" : "ask") : undefined;
 		const ghost = handoff && text.trim() === "" ? handoff.text : undefined;
 		return { hint, ghost };
 	}
 
-	let belowCache = { hint: false, ghost: undefined as string | undefined };
+	let belowCache: { hint: HintKind; ghost: string | undefined } = { hint: undefined, ghost: undefined };
 
 	function refreshBelow(): void {
 		const ctx = ctxRef;
@@ -571,7 +601,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		const state = belowState();
 		belowCache = state;
 		panel.editorEmpty = editorText().trim() === "";
-		const show = state.hint || state.ghost !== undefined;
+		const show = state.hint !== undefined || state.ghost !== undefined;
 		try {
 			if (show !== belowShown) {
 				belowShown = show;
@@ -619,8 +649,12 @@ export default function piAside(pi: ExtensionAPI): void {
 			if (kb.matches(data, "tui.input.submit") && editorText().trim() === "" && editorFocused() && putAway()) {
 				return { consume: true };
 			}
-			// Pi's "more" (ctrl+o) expands the aside with everything else; Pi still toggles its tool output.
-			if (kb.matches(data, "app.tools.expand") && editorFocused()) toggleMore();
+			// Pi's "more" key belongs to the panel only while the panel prints it.
+			const action = panelShown && !panel.hidden ? panelMore : undefined;
+			if (action && kb.matches(data, "app.tools.expand") && editorFocused()) {
+				more(action);
+				return { consume: true };
+			}
 			if (handoff && kb.matches(data, "tui.input.tab")) {
 				let text = "";
 				try {

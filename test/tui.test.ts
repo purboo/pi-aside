@@ -258,7 +258,7 @@ describe("TUI", () => {
 		expect(screen).not.toMatch(/thinking|working|Comparing/);
 	}, 60_000);
 
-	test("Enter on an empty editor puts the panel away: the frame, then its one line; /aside still rereads it", async () => {
+	test("Enter on an empty editor puts the panel away: the frame folds to one line, then clears; /aside still rereads it", async () => {
 		const { server, tui } = await start();
 		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
 		tui.type("hello");
@@ -268,16 +268,16 @@ describe("TUI", () => {
 		tui.type("/aside what happened?");
 		tui.key("Enter");
 		await tui.waitForScreen(/The side answer\./);
-		await tui.waitForScreen(/─ ↵ hides ─╯/);
+		await tui.waitForScreen(/─ ↵ folds ─╯/);
 		// Typing takes the hint away: Enter would send the text.
 		tui.type("x");
 		await sleep(300);
-		expect(tui.screen()).not.toMatch(/↵ hides/);
+		expect(tui.screen()).not.toMatch(/↵ folds/);
 		tui.key("BSpace");
-		await tui.waitForScreen(/↵ hides/);
+		await tui.waitForScreen(/↵ folds/);
 		const requests = server.requests.length;
 		tui.key("Enter");
-		await tui.waitForScreen(/▸ what happened\?/);
+		await tui.waitForScreen(/▸ what happened\? +↵ clears/);
 		expect(tui.screen()).not.toMatch(/The side answer\./);
 		tui.key("Enter");
 		for (let i = 0; i < 50 && /▸ what happened\?/.test(tui.screen()); i++) await sleep(100);
@@ -293,27 +293,71 @@ describe("TUI", () => {
 		expect(tui.screen()).not.toMatch(/esc close/);
 	}, 60_000);
 
-	test("ctrl+o (Pi's `more`) expands a long answer and reopens a collapsed panel", async () => {
+	test("a long answer: ctrl+o where the panel prints it opens the reader; typing there goes on in the editor", async () => {
 		const { server, tui } = await start();
 		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
 		tui.type("hello");
 		tui.key("Enter");
 		await tui.waitForScreen(/Hello\./);
-		const lines = Array.from({ length: 9 }, (_, i) => `point number ${i + 1}`).join("\n\n");
+		const lines = Array.from({ length: 30 }, (_, i) => `point number ${i + 1}`).join("\n\n");
 		server.enqueue({ text: `route: side\n${lines}`, usage: { input: 10, cacheRead: 900 } });
 		tui.type("/aside list the points");
 		tui.key("Enter");
-		await tui.waitForScreen(/\u2026 ctrl\+o more/);
-		expect(tui.screen()).not.toMatch(/point number 9/);
+		await tui.waitForScreen(/\u2193 \d+ more lines \u00b7 ctrl\+o/);
+		expect(tui.screen()).toMatch(/point number 1\b/);
+		expect(tui.screen()).not.toMatch(/point number 30/);
 		tui.key("C-o");
-		await tui.waitForScreen(/point number 9/);
-		expect(tui.screen()).not.toMatch(/ctrl\+o more/);
+		await tui.waitForScreen(/type to follow up/);
+		tui.key("End");
+		await tui.waitForScreen(/point number 30/);
+		tui.type("and the last one");
+		for (let i = 0; i < 50 && /type to follow up/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/type to follow up/);
+		await tui.waitForScreen(/and the last one/);
+		// Folded, the panel no longer claims ctrl+o: it stays Pi's.
+		for (let i = 0; i < 16; i++) tui.key("BSpace");
+		await tui.waitForScreen(/\u2193 \d+ more lines/);
 		tui.key("Enter");
 		await tui.waitForScreen(/\u25b8 list the points/);
 		tui.key("C-o");
-		await tui.waitForScreen(/point number 9/);
-		tui.key("C-o");
-		await tui.waitForScreen(/\u2026 ctrl\+o more/);
+		await sleep(600);
+		expect(tui.screen()).not.toMatch(/type to follow up/);
+		expect(tui.screen()).toMatch(/\u25b8 list the points/);
+	}, 60_000);
+
+	test("an open panel means a follow-up, a folded one a fresh question; the hint says which before Enter", async () => {
+		const { server, tui } = await start();
+		// The agent stays busy in a tool call; its next request comes long after this test.
+		server.enqueue({ toolCalls: [{ id: "toolu_9", name: "bash", arguments: { command: "sleep 40; echo ok" } }], usage: { input: 50, cacheWrite: 900 } });
+		tui.type("refactor the parser");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		server.enqueue({ text: "route: side\nBecause B touches fewer callers.", usage: { input: 20, cacheRead: 900 } });
+		tui.type("why did it pick B?");
+		await tui.waitForScreen(/↵ asks on the side/);
+		tui.key("Enter");
+		await tui.waitForScreen(/Because B touches fewer callers\./);
+		server.enqueue({ text: "route: side\nYes, in cli.ts.", usage: { input: 20, cacheRead: 900 } });
+		tui.type("is A still used?");
+		await tui.waitForScreen(/↵ follows up on the side/);
+		tui.key("Enter");
+		const followed = await tui.waitForScreen(/Yes, in cli\.ts\./);
+		expect(followed).toMatch(/╭─ is A still used\?/);
+		expect(followed).toMatch(/after: why did it pick B\?/);
+		expect(followed).not.toMatch(/Because B touches/);
+		const asides = server.requests.filter((r) => JSON.stringify(r.body).includes("<aside>"));
+		expect(JSON.stringify(asides.at(-1)!.body)).toContain("Because B touches fewer callers.");
+		tui.key("Enter");
+		await tui.waitForScreen(/\u25b8 is A still used\?/);
+		server.enqueue({ text: "route: side\nAbout a minute.", usage: { input: 20, cacheRead: 900 } });
+		tui.type("how long will it take?");
+		await tui.waitForScreen(/↵ asks on the side/);
+		expect(tui.screen()).not.toMatch(/follows up/);
+		tui.key("Enter");
+		const fresh = await tui.waitForScreen(/About a minute\./);
+		expect(fresh).not.toMatch(/after:/);
+		expect(JSON.stringify(server.requests.at(-1)!.body)).not.toContain("Yes, in cli.ts.");
 	}, 60_000);
 
 	test("the reader opens at the latest question; long CJK Markdown lines wrap inside its frame", async () => {
@@ -326,7 +370,7 @@ describe("TUI", () => {
 		server.enqueue({ text: `route: side\n${long}`, usage: { input: 10, cacheRead: 900 } });
 		tui.type("/aside first?");
 		tui.key("Enter");
-		await tui.waitForScreen(/\u2026 ctrl\+o more/);
+		await tui.waitForScreen(/more lines \u00b7 ctrl\+o/);
 		const cjk =
 			"1. **\u5386\u53f2\u6570\u636e\u4e0d\u518d\u7b97\u9a8c\u8bc1**\uff1a\u5df2\u5b8c\u6210\u5e76\u5408\u5165 trunk\uff08`1fe6175`\uff0cledger #294\uff09\u3002" +
 			"\u8fd9\u662f\u4e00\u6bb5\u5f88\u957f\u7684\u4e2d\u6587\u53e5\u5b50".repeat(12) +
