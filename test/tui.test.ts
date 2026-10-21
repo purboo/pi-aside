@@ -1,6 +1,7 @@
 // Key replay in the real Pi TUI (docs/ux.md §6: U2, U5, U9 and the route check), offline in a private tmux.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { type CaptureServer, startCaptureServer } from "./harness/capture.ts";
 import { type PiTui, startPiTui } from "./harness/tui.ts";
@@ -30,9 +31,9 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 
 const BG = join(ROOT, "test/fixtures/bg.ts");
 
-async function start(extensions: string[] = [ASIDE]): Promise<{ server: CaptureServer; tui: PiTui }> {
+async function start(extensions: string[] = [ASIDE], settings?: Record<string, unknown>): Promise<{ server: CaptureServer; tui: PiTui }> {
 	server = await startCaptureServer();
-	tui = await startPiTui({ baseUrl: server.url, extensions });
+	tui = await startPiTui({ baseUrl: server.url, extensions, settings });
 	await tui.waitForScreen(/claude-test/, 20_000);
 	return { server, tui };
 }
@@ -58,12 +59,13 @@ describe("TUI", () => {
 		await sleep(1000);
 		expect(server.requests.length).toBe(2);
 		expect(bodies(server)[0]).not.toContain("approach B");
-		// Sending anything to the agent collapses the panel to one dim line.
+		// Sending something to the agent leaves the panel as it is: only the user closes it.
 		server.enqueue({ text: "Okay.", usage: { input: 50, cacheRead: 900 } });
 		tui.type("thanks");
 		tui.key("Enter");
-		await tui.waitForScreen(/▸ why did it pick approach B\?/);
 		await server.waitForRequests(3);
+		await tui.waitForScreen(/Okay\./);
+		expect(tui.screen()).toMatch(/╭─ why did it pick approach B\?/);
 		const third = bodies(server)[2]!;
 		expect(third).toContain("thanks");
 		expect(third).not.toContain("why did it pick approach B");
@@ -112,7 +114,7 @@ describe("TUI", () => {
 		expect(prompt).not.toContain("<aside>");
 	}, 60_000);
 
-	test("Esc aborts the agent with the panel visible", async () => {
+	test("Esc closes the panel first (a quick second Esc is a double press); the next Esc stops the agent", async () => {
 		const { server, tui } = await start();
 		const hold = deferred();
 		server.enqueue({ text: "First part.", usage: { input: 50, cacheWrite: 900 } });
@@ -128,8 +130,61 @@ describe("TUI", () => {
 		tui.key("Enter");
 		await tui.waitForScreen(/Working/);
 		tui.key("Escape");
+		for (let i = 0; i < 50 && /Side answer here\./.test(tui.screen()); i++) await sleep(50);
+		expect(tui.screen()).not.toMatch(/Side answer here\./);
+		tui.key("Escape");
+		await sleep(800);
+		expect(tui.screen()).not.toMatch(/[Aa]bort/);
+		expect(tui.screen()).toMatch(/Working/);
+		// With nothing of the aside on screen, Esc is Pi's again.
+		tui.key("Escape");
 		await tui.waitForScreen(/[Aa]bort/);
 		hold.resolve();
+	}, 60_000);
+
+	test("Esc dismisses autocomplete before the aside, and a focused dialog keeps its own Esc", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		server.enqueue({ text: "route: side\nKeep this answer visible.", usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside question");
+		tui.key("Enter");
+		await tui.waitForScreen(/Keep this answer visible\./);
+		tui.type("/mod");
+		await tui.waitForScreen(/Select model|Switch model|\/model/);
+		tui.key("Escape");
+		await sleep(200);
+		expect(tui.screen()).toMatch(/Keep this answer visible\./);
+		tui.key("C-u");
+		tui.key("C-l");
+		await tui.waitForScreen(/Enter to select · Ctrl\+S to set as default/);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /Enter to select · Ctrl\+S/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/Enter to select · Ctrl\+S/);
+		expect(tui.screen()).toMatch(/Keep this answer visible\./);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /Keep this answer visible\./.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/Keep this answer visible\./);
+	}, 60_000);
+
+	test("regular mode keeps keyboard dismissal and does not advertise touch targets", async () => {
+		const { server, tui } = await start([ASIDE], { tuiMode: "regular" });
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		server.enqueue({ text: "route: side\nRegular side answer.", usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside regular mode question");
+		tui.key("Enter");
+		await tui.waitForScreen(/Regular side answer\./);
+		const title = tui.screen().split("\n").find((line) => line.includes("╭─ regular mode question"));
+		expect(title).toBeDefined();
+		expect(title).not.toContain("✕");
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /Regular side answer\./.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/Regular side answer\./);
 	}, 60_000);
 
 	test("handoff: ghost text, Tab accepts into the editor, Enter sends it with the side note", async () => {
@@ -258,7 +313,7 @@ describe("TUI", () => {
 		expect(screen).not.toMatch(/thinking|working|Comparing/);
 	}, 60_000);
 
-	test("Enter on an empty editor puts the panel away: the frame folds to one line, then clears; /aside still rereads it", async () => {
+	test("Esc closes the panel and stops an aside still running; Enter on an empty editor leaves it; /aside rereads it", async () => {
 		const { server, tui } = await start();
 		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
 		tui.type("hello");
@@ -268,19 +323,12 @@ describe("TUI", () => {
 		tui.type("/aside what happened?");
 		tui.key("Enter");
 		await tui.waitForScreen(/The side answer\./);
-		await tui.waitForScreen(/─ ↵ folds ─╯/);
-		// Typing takes the hint away: Enter would send the text.
-		tui.type("x");
-		await sleep(300);
-		expect(tui.screen()).not.toMatch(/↵ folds/);
-		tui.key("BSpace");
-		await tui.waitForScreen(/↵ folds/);
 		const requests = server.requests.length;
 		tui.key("Enter");
-		await tui.waitForScreen(/▸ what happened\? +↵ clears/);
-		expect(tui.screen()).not.toMatch(/The side answer\./);
-		tui.key("Enter");
-		for (let i = 0; i < 50 && /▸ what happened\?/.test(tui.screen()); i++) await sleep(100);
+		await sleep(500);
+		expect(tui.screen()).toMatch(/╭─ what happened\?/);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /what happened\?/.test(tui.screen()); i++) await sleep(100);
 		expect(tui.screen()).not.toMatch(/what happened\?/);
 		await sleep(500);
 		expect(server.requests.length).toBe(requests);
@@ -291,6 +339,23 @@ describe("TUI", () => {
 		tui.key("Escape");
 		for (let i = 0; i < 50 && /esc close/.test(tui.screen()); i++) await sleep(100);
 		expect(tui.screen()).not.toMatch(/esc close/);
+		// An aside still running stops with its panel.
+		const hold = deferred();
+		server.enqueue({ text: "route: side\nNever shown.", hold: hold.promise, usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside is it slow?");
+		tui.key("Enter");
+		await tui.waitForScreen(/╭─ is it slow\?/);
+		await server.waitForRequests(requests + 1);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /is it slow\?/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/is it slow\?/);
+		hold.resolve();
+		tui.type("/aside");
+		tui.key("Enter");
+		const reread = await tui.waitForScreen(/esc close/);
+		expect(reread).toMatch(/\(stopped\)/);
+		expect(reread).not.toMatch(/Never shown\./);
+		tui.key("Escape");
 	}, 60_000);
 
 	test("a long answer: ctrl+o where the panel prints it opens the reader; typing there goes on in the editor", async () => {
@@ -314,18 +379,101 @@ describe("TUI", () => {
 		for (let i = 0; i < 50 && /type to follow up/.test(tui.screen()); i++) await sleep(100);
 		expect(tui.screen()).not.toMatch(/type to follow up/);
 		await tui.waitForScreen(/and the last one/);
-		// Folded, the panel no longer claims ctrl+o: it stays Pi's.
+		// Closed, the panel no longer claims ctrl+o: it stays Pi's.
 		for (let i = 0; i < 16; i++) tui.key("BSpace");
 		await tui.waitForScreen(/\u2193 \d+ more lines/);
-		tui.key("Enter");
-		await tui.waitForScreen(/\u25b8 list the points/);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /list the points/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/list the points/);
 		tui.key("C-o");
 		await sleep(600);
 		expect(tui.screen()).not.toMatch(/type to follow up/);
-		expect(tui.screen()).toMatch(/\u25b8 list the points/);
 	}, 60_000);
 
-	test("an open panel means a follow-up, a folded one a fresh question; the hint says which before Enter", async () => {
+	test("fullscreen: the wheel (a swipe) over the panel scrolls it, not the conversation; a tap on its close mark closes it", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ text: "Hello.", usage: { input: 50, cacheWrite: 900 } });
+		tui.type("hello");
+		tui.key("Enter");
+		await tui.waitForScreen(/Hello\./);
+		const lines = Array.from({ length: 30 }, (_, i) => `point number ${i + 1}`).join("\n\n");
+		server.enqueue({ text: `route: side\n${lines}`, usage: { input: 10, cacheRead: 900 } });
+		tui.type("/aside list the points");
+		tui.key("Enter");
+		await tui.waitForScreen(/\u2193 \d+ more lines \u00b7 ctrl\+o/);
+		const rows = tui.screen().split("\n");
+		const top = rows.findIndex((line) => line.includes("\u256d\u2500 list the points"));
+		expect(top).toBeGreaterThanOrEqual(0);
+		expect(rows[top]).toContain("\u2715");
+		expect(tui.screen()).toMatch(/point number 1\b/);
+		// Wheel down over the panel (SGR button 65, 1-based cells).
+		for (let i = 0; i < 6; i++) tui.type(`\x1b[<65;20;${top + 4}M`);
+		await tui.waitForScreen(/\u2191 \d+ more lines/);
+		expect(tui.screen()).not.toMatch(/point number 1\b/);
+		expect(tui.screen()).toMatch(/Hello\./);
+		// Wheel up again: back at the start.
+		for (let i = 0; i < 40; i++) tui.type(`\x1b[<64;20;${top + 4}M`);
+		await tui.waitForScreen(/point number 1\b/);
+		// Tap the count line to read more; the reader owns its wheel and its close mark, too.
+		let now = tui.screen().split("\n");
+		const countRow = now.findIndex((line) => /↓ \d+ more lines/.test(line));
+		expect(countRow).toBeGreaterThanOrEqual(0);
+		tui.type(`\x1b[<0;20;${countRow + 1}M`);
+		tui.type(`\x1b[<0;20;${countRow + 1}m`);
+		await tui.waitForScreen(/type to follow up/);
+		now = tui.screen().split("\n");
+		let readerTop = now.findIndex((line) => /╭─ aside /.test(line));
+		expect(readerTop).toBeGreaterThanOrEqual(0);
+		for (let i = 0; i < 6; i++) tui.type(`\x1b[<65;20;${readerTop + 5}M`);
+		await sleep(200);
+		expect(tui.screen()).not.toMatch(/\? list the points/);
+		now = tui.screen().split("\n");
+		readerTop = now.findIndex((line) => /╭─ aside /.test(line));
+		const readerClose = [...now[readerTop]!].indexOf("✕") + 1;
+		tui.type(`\x1b[<0;${readerClose};${readerTop + 1}M`);
+		tui.type(`\x1b[<0;${readerClose};${readerTop + 1}m`);
+		for (let i = 0; i < 50 && /type to follow up/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/type to follow up/);
+		// A tap on the panel's close mark: press and release on the same cell.
+		now = tui.screen().split("\n");
+
+		const row = now.findIndex((line) => line.includes("\u256d\u2500 list the points"));
+		const col = [...now[row]!].indexOf("\u2715") + 1;
+		tui.type(`\x1b[<0;${col};${row + 1}M`);
+		tui.type(`\x1b[<0;${col};${row + 1}m`);
+		for (let i = 0; i < 50 && /list the points/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/list the points/);
+		expect(tui.screen()).toMatch(/Hello\./);
+	}, 60_000);
+
+	test("a side task: its tools run only after the route line, and the panel lists what it did", async () => {
+		const { server, tui } = await start();
+		// The agent stays busy in a tool call; its next request comes long after this test.
+		server.enqueue({ toolCalls: [{ id: "toolu_8", name: "bash", arguments: { command: "sleep 40; echo ok" } }], usage: { input: 50, cacheWrite: 900 } });
+		tui.type("refactor the parser");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		server.enqueue(
+			{ toolCalls: [{ id: "toolu_x", name: "bash", arguments: { command: "echo early >> log.txt" } }], usage: { input: 20, cacheRead: 900 } },
+			{ text: "route: side\nOn it.", toolCalls: [{ id: "toolu_y", name: "bash", arguments: { command: "echo side >> log.txt" } }], usage: { input: 20, cacheRead: 900 } },
+			{ text: "Logged it.", usage: { input: 20, cacheRead: 900 } },
+		);
+		tui.type("add a line to log.txt?");
+		await tui.waitForScreen(/\u21b5 asks on the side/);
+		tui.key("Enter");
+		const screen = await tui.waitForScreen(/Logged it\./);
+		expect(screen).toMatch(/\u2713 \$ echo side >> log\.txt/);
+		expect(screen).not.toMatch(/echo early/);
+		expect(readFileSync(join(tui.cwd, "log.txt"), "utf8")).toBe("side\n");
+		const asides = server.requests.filter((r) => JSON.stringify(r.body).includes("<aside>"));
+		expect(asides.length).toBe(3);
+		expect(JSON.stringify(asides[1]!.body)).toContain("Not run: start your reply with the route line");
+		// The main session never saw it.
+		expect(JSON.stringify(server.requests[0]!.body)).not.toContain("log.txt");
+	}, 60_000);
+
+	test("an open panel means a follow-up, a closed one a fresh question; the hint says which before Enter", async () => {
 		const { server, tui } = await start();
 		// The agent stays busy in a tool call; its next request comes long after this test.
 		server.enqueue({ toolCalls: [{ id: "toolu_9", name: "bash", arguments: { command: "sleep 40; echo ok" } }], usage: { input: 50, cacheWrite: 900 } });
@@ -348,8 +496,9 @@ describe("TUI", () => {
 		expect(followed).not.toMatch(/Because B touches/);
 		const asides = server.requests.filter((r) => JSON.stringify(r.body).includes("<aside>"));
 		expect(JSON.stringify(asides.at(-1)!.body)).toContain("Because B touches fewer callers.");
-		tui.key("Enter");
-		await tui.waitForScreen(/\u25b8 is A still used\?/);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /\u256d\u2500 is A still used\?/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/\u256d\u2500 is A still used\?/);
 		server.enqueue({ text: "route: side\nAbout a minute.", usage: { input: 20, cacheRead: 900 } });
 		tui.type("how long will it take?");
 		await tui.waitForScreen(/↵ asks on the side/);

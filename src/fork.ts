@@ -34,6 +34,8 @@ export interface ForkEnv {
 	selectedModel: () => Any;
 	thinkingLevel: () => string;
 	systemPrompt: () => string;
+	/** Request-only tool declaration projection, matching Pi's hidden loadout declarations. */
+	projectMessages?: (messages: unknown[]) => unknown[];
 }
 
 const IMAGE_DISABLED = "Image reading is disabled.";
@@ -223,7 +225,7 @@ export async function dryRun(
 		captured = structuredClone(payload) as Payload;
 		throw new Fallback("dry run");
 	};
-	const message = await finish(env.registry.streamSimple(model, toContext(messages, fork.recipe.blockImages), options));
+	const message = await finish(env.registry.streamSimple(model, toContext(env.projectMessages?.(messages) ?? messages, fork.recipe.blockImages), options));
 	if (!captured) throw new Fallback(`the dry conversion failed: ${message?.errorMessage ?? "no payload"}`);
 	return captured;
 }
@@ -449,7 +451,7 @@ async function sendExact(
 		return demote(env, fork, "the model configuration changed", messages, signal, onEvent);
 	}
 	const options = baseOptions(env, fork, clone, signal);
-	const context = toContext(messages, recipe.blockImages);
+	const context = toContext(env.projectMessages?.(messages) ?? messages, recipe.blockImages);
 	const env0 = envSnapshot();
 	options.onPayload = (b1: unknown) => {
 		// Currency check: the registry's model and the environment are still the ones cloned.
@@ -506,7 +508,7 @@ async function sendRebuilt(
 		sent = payload as Payload;
 		return undefined;
 	};
-	const stream = env.registry.streamSimple(model, toContext(messages, recipe.blockImages), options);
+	const stream = env.registry.streamSimple(model, toContext(env.projectMessages?.(messages) ?? messages, recipe.blockImages), options);
 	const message = await pump(stream, onEvent, () => true);
 	return { message, tier: "rebuilt", reason: fork.reason, markers: sent ? countMarkers(sent) : undefined, sent };
 }

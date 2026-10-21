@@ -2,16 +2,18 @@
 // Engine: docs/design.md. Interaction: docs/ux.md.
 
 import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, keyText } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, Markdown } from "@earendil-works/pi-tui";
+import { getKeybindings, Markdown, matchesKey } from "@earendil-works/pi-tui";
 import { BackgroundWork } from "./busy.ts";
 import type { ForkEnv } from "./fork.ts";
 import { Observer, type Recipe } from "./observe.ts";
 import {
+	closeZone,
 	type HintKind,
 	type MarkdownRenderer,
 	MONEY_THRESHOLD,
 	type MoreAction,
 	type PanelState,
+	type PanelView,
 	panelRoom,
 	panelView,
 	plainText,
@@ -23,6 +25,7 @@ import {
 import { endsWithQuestionMark, routeEnter } from "./qmark.ts";
 import { parseReply } from "./reply.ts";
 import { AsideThread, type TurnView } from "./thread.ts";
+import { installToolExecutor, projectAsideTools } from "./tools.ts";
 import { installFinalPayloadTap } from "./tap.ts";
 import { currentSettings } from "./transport.ts";
 import { UsageQueue } from "./usage.ts";
@@ -35,6 +38,8 @@ const BELOW_WIDGET = "pi-aside-below";
 const STATUS_KEY = "pi-aside";
 const SIDE_NOTE_TYPE = "aside";
 const REBUILT_NOTICE_AFTER = 3;
+/** After Esc closes the panel, a second Esc this soon is a double press or a key repeat, not "stop the agent". */
+export const ESC_GUARD_MS = 500;
 
 /** Pi's Markdown component with Pi's Markdown theme; the last few renders are kept (the spinner redraws often). */
 function markdownRenderer(theme: Any): MarkdownRenderer {
@@ -59,14 +64,20 @@ function markdownRenderer(theme: Any): MarkdownRenderer {
 }
 
 export default function piAside(pi: ExtensionAPI): void {
+	const executeTool = installToolExecutor(pi);
 	const observer = new Observer();
 	let ctxRef: ExtensionContext | undefined;
 	let thread: AsideThread | undefined;
-	let panel: PanelState = { turns: [], collapsed: false };
+	let panel: PanelState = { turns: [] };
 	let tuiRef: Any;
 	let panelShown = false;
-	/** What Pi's "more" key does while the panel's last render is on screen (it claims the key only there). */
+	/** The panel's last render: what Pi's "more" key and the mouse do while it is on screen. */
+	let panelLast: PanelView = { lines: [] };
 	let panelMore: MoreAction | undefined;
+	/** When Esc last closed the panel (ESC_GUARD_MS). */
+	let closedAt = 0;
+	/** Invalidates callbacks and completions from a stopped or replaced aside. */
+	let askSeq = 0;
 	let belowShown = false;
 	let handoff: { text: string; note: string } | undefined;
 	let acceptedHandoff: { text: string; note: string } | undefined;
@@ -95,6 +106,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		selectedModel: () => ctxRef?.model,
 		thinkingLevel: () => pi.getThinkingLevel(),
 		systemPrompt: () => ctxRef?.getSystemPrompt() ?? "",
+		projectMessages: (messages) => projectAsideTools(messages, pi.getActiveTools()),
 	};
 
 	// ---------------------------------------------------------------- observation (design §4.1)
@@ -167,9 +179,11 @@ export default function piAside(pi: ExtensionAPI): void {
 	// ---------------------------------------------------------------- sessions
 
 	function resetSession(ctx: ExtensionContext | undefined): void {
+		askSeq++;
+		closedAt = 0;
 		thread?.abort();
 		thread = undefined;
-		panel = { turns: [], collapsed: false };
+		panel = { turns: [] };
 		handoff = undefined;
 		acceptedHandoff = undefined;
 		rebuiltInARow = 0;
@@ -181,6 +195,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	}
 
 	function beforeLeaving(): void {
+		askSeq++;
 		const dropped = usage.flushOrDrop();
 		thread?.abort();
 		if (dropped > 0) {
@@ -216,6 +231,8 @@ export default function piAside(pi: ExtensionAPI): void {
 		observer.reset();
 	});
 	pi.on("session_tree", (_event, ctx) => {
+		askSeq++;
+		thread?.abort();
 		ctxRef = ctx;
 		observer.reset();
 	});
@@ -237,22 +254,20 @@ export default function piAside(pi: ExtensionAPI): void {
 	pi.on("input", (event, ctx) => {
 		ctxRef = ctx;
 		if (event.source !== "interactive") return { action: "continue" };
-		if (event.images && event.images.length > 0) return collapseAndContinue(event.text);
+		if (event.images && event.images.length > 0) return continueToAgent(event.text);
 		const key = event.streamingBehavior === "followUp" ? "followUp" : "submit";
 		if (routeEnter({ text: event.text, busy: busy(), key }) === "side") {
 			void startAside(event.text, { routeCheck: true });
 			return { action: "handled" };
 		}
-		return collapseAndContinue(event.text);
+		return continueToAgent(event.text);
 	});
 
-	/** The user is sending something to the agent: collapse the panel and attach an accepted handoff's side note. */
-	function collapseAndContinue(text: string): { action: "continue" } {
-		// An answer still streaming stays visible: the user is waiting for it.
-		if (panel.turns.length > 0 && !panel.collapsed && !thread?.busy) {
-			panel.collapsed = true;
-			renderNow();
-		}
+	/**
+	 * The user is sending something to the agent: attach an accepted handoff's side note. The panel stays as it is: it
+	 * closes only when the user closes it (docs/ux.md §3.2).
+	 */
+	function continueToAgent(text: string): { action: "continue" } {
 		if (acceptedHandoff && text.trim().length > 0) {
 			const note = acceptedHandoff.note;
 			acceptedHandoff = undefined;
@@ -289,37 +304,39 @@ export default function piAside(pi: ExtensionAPI): void {
 			usage,
 			cwd: () => ctxRef?.cwd ?? process.cwd(),
 			sessionId: () => ctxRef?.sessionManager.getSessionId() ?? "",
+			executeTool,
 			onUpdate: () => renderNow(),
 		};
 	}
 
 	/**
 	 * Whether the next question continues the current thread: exactly while its panel is open (docs/ux.md §3.2). A
-	 * folded or cleared panel means the user is done with it, and the next question starts afresh.
+	 * closed panel means the user is done with it, and the next question starts afresh.
 	 */
 	function continues(): boolean {
 		const ctx = ctxRef;
 		if (!ctx || !thread || thread.turns.length === 0) return false;
-		if (panel.collapsed || panel.hidden || panel.sentToAgent) return false;
+		if (panel.hidden || panel.sentToAgent) return false;
 		return thread.valid(observer, ctx.sessionManager.getSessionId());
 	}
 
 	async function startAside(question: string, options: { routeCheck: boolean }): Promise<TurnView | undefined> {
 		const ctx = ctxRef;
 		if (!ctx) return undefined;
+		const seq = ++askSeq;
 		if (!continues()) {
 			thread?.abort();
 			thread = new AsideThread(threadHost());
-			panel = { turns: thread.turns, collapsed: false };
+			panel = { turns: thread.turns };
 		} else if (thread!.busy) {
 			thread!.abort();
 		}
 		const current = thread!;
 		handoff = undefined;
 		acceptedHandoff = undefined;
-		panel.collapsed = false;
 		panel.hidden = false;
 		panel.sentToAgent = undefined;
+		panel.scrollTop = undefined;
 		showPanel(true);
 		refreshBelow();
 		const wasWaiting = waiting();
@@ -327,7 +344,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		const turn = await current.ask(question, {
 			routeCheck: options.routeCheck,
 			onRoute: (route) => {
-				if (route !== "agent" || !options.routeCheck) return;
+				if (seq !== askSeq || current !== thread || panel.hidden || route !== "agent" || !options.routeCheck) return;
 				routedToAgent = true;
 				current.abort();
 				panel.sentToAgent = { text: question, waiting: wasWaiting };
@@ -335,7 +352,7 @@ export default function piAside(pi: ExtensionAPI): void {
 				renderNow();
 			},
 		});
-		if (current !== thread) return turn;
+		if (current !== thread || seq !== askSeq) return turn;
 		const parsed = parseReply(turn.raw, true);
 		if (options.routeCheck && !routedToAgent && !turn.aborted && turn.error && !parseReply(turn.raw, false).route) {
 			// The aside failed before its route line: the text keeps Pi's meaning.
@@ -413,7 +430,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	// ---------------------------------------------------------------- /aside
 
 	pi.registerCommand("aside", {
-		description: "Ask a side question about the session without touching it; with no question, reread the latest aside",
+		description: "Ask or do an independent task on the side; with no text, reread the latest aside",
 		handler: async (args, ctx) => {
 			ctxRef = ctx;
 			if (ctx.mode !== "tui" && ctx.mode !== "rpc") {
@@ -445,17 +462,15 @@ export default function piAside(pi: ExtensionAPI): void {
 			if (turn.error) answer += `${answer ? "\n\n" : ""}aside failed: ${turn.error}`;
 			if (turn.aborted) answer += `${answer ? "\n\n" : ""}(stopped)`;
 			if (parsed.handoff) answer += `\n\nhandoff: ${parsed.handoff}`;
+			const steps = turn.steps.map((step) => `${step.ok ? "✓" : "✗"} ${step.label}`);
 			const hash = thread?.fork?.pHash ? ` · p ${thread.fork.pHash.slice(0, 12)}` : "";
-			return { question: turn.question, answer, detail: `${detail(turn)}${hash}` };
+			return { question: turn.question, answer, detail: `${detail(turn)}${hash}`, steps };
 		});
 	}
 
 	/** Typing in the reader: the thread's panel opens again (so `?` follows up) and the text goes on in the editor. */
 	function typeFromReader(text: string): void {
-		if (thread && thread.turns.length > 0) {
-			panel.collapsed = false;
-			panel.hidden = false;
-		}
+		if (thread && thread.turns.length > 0) panel.hidden = false;
 		try {
 			ctxRef?.ui.pasteToEditor(text);
 		} catch {
@@ -471,11 +486,15 @@ export default function piAside(pi: ExtensionAPI): void {
 				new Reader(
 					readerTurns,
 					theme,
-					() => done(undefined),
+					() => {
+						closedAt = Date.now();
+						done(undefined);
+					},
 					() => tui.requestRender(),
 					() => tui.terminal?.rows ?? process.stdout.rows ?? 40,
 					markdownRenderer(theme),
 					typeFromReader,
+					() => typeof tui?.scrollBy === "function",
 				),
 			{ overlay: true, overlayOptions: { width: "90%", maxHeight: "85%", anchor: "center" } as Any },
 		);
@@ -525,18 +544,52 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (ctxRef) void openReader(ctxRef);
 	}
 
+	/** Whether the panel is on screen. */
+	function panelOpen(): boolean {
+		return panelShown && panel.turns.length > 0 && !panel.hidden;
+	}
+
 	/**
-	 * Enter on an empty editor puts the panel away (docs/ux.md §3.2): the frame folds to one dim line, and the next
-	 * such Enter clears that line. The thread stays readable with `/aside`.
+	 * Close the panel (docs/ux.md §3.2): Esc, or a click or a tap on its close mark. An answer or a task still running
+	 * stops with it. The thread stays readable with `/aside`; the next question starts a new one.
 	 */
-	function putAway(): boolean {
+	function closePanel(): boolean {
 		if (panel.turns.length === 0 || panel.hidden) return false;
-		if (panel.collapsed) panel.hidden = true;
-		else panel.collapsed = true;
+		askSeq++;
+		if (thread?.busy) thread.abort();
+		panel.hidden = true;
 		handoff = undefined;
 		renderNow();
 		refreshBelow();
 		return true;
+	}
+
+	/** The wheel or a swipe over the panel: scroll a long answer; at the end of one still streaming, follow it again. */
+	function scrollPanel(delta: number): void {
+		const scroll = panelLast.scroll;
+		if (!scroll) return;
+		const top = Math.min(scroll.max, Math.max(0, (panel.scrollTop ?? scroll.top) + delta));
+		const streaming = !!panel.turns.at(-1) && !panel.turns.at(-1)!.done;
+		panel.scrollTop = streaming && top >= scroll.max ? undefined : top;
+	}
+
+	/** Mouse events over the panel, where Pi reports them (fullscreen mode). */
+	function panelMouse(event: Any): { handled: true } | undefined {
+		if (event.type === "wheel" && event.wheelDelta) {
+			scrollPanel(event.wheelDelta);
+			return { handled: true };
+		}
+		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
+		const [from, to] = closeZone(event.width);
+		const onClose = panel.mouse && event.y === 0 && event.x >= from && event.x <= to;
+		const onMore = panelLast.readerRows?.includes(event.y) ?? false;
+		if (!onClose && !onMore) return undefined;
+		// The press makes the panel the target of the click that follows on the same cell.
+		if (event.type === "click") {
+			if (onClose) closePanel();
+			else if (ctxRef) void openReader(ctxRef);
+		}
+		return { handled: true };
 	}
 
 	function showPanel(show: boolean): void {
@@ -547,6 +600,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		try {
 			if (!show) {
 				panelMore = undefined;
+				panelLast = { lines: [] };
 				ctx.ui.setWidget(PANEL_WIDGET, undefined);
 				return;
 			}
@@ -564,10 +618,14 @@ export default function piAside(pi: ExtensionAPI): void {
 							} catch {
 								panel.moreKey = undefined;
 							}
+							// Pi reports the mouse in its fullscreen mode, whose renderer scrolls its own viewport.
+							panel.mouse = typeof tui?.scrollBy === "function";
 							const view = panelView(panel, width, theme, md, Date.now());
+							panelLast = view;
 							panelMore = view.more;
 							return view.lines;
 						},
+						handleMouse: panelMouse,
 						invalidate() {},
 					};
 				},
@@ -600,7 +658,6 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (!ctx || ctx.mode !== "tui") return;
 		const state = belowState();
 		belowCache = state;
-		panel.editorEmpty = editorText().trim() === "";
 		const show = state.hint !== undefined || state.ghost !== undefined;
 		try {
 			if (show !== belowShown) {
@@ -622,20 +679,22 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 	}
 
-	function editorText(): string {
-		try {
-			return ctxRef?.ui.getEditorText() ?? "";
-		} catch {
-			return "";
-		}
-	}
-
 	/** Whether Pi's input editor has the focus (not a selector, a dialog or another extension's overlay). */
 	function editorFocused(): boolean {
 		const focus = tuiRef?.getFocusedComponent;
 		if (typeof focus !== "function") return true;
 		const focused = focus.call(tuiRef);
 		return !!focused && typeof focused === "object" && focused.actionHandlers instanceof Map;
+	}
+
+	/** Whether the editor shows its autocomplete list, which Esc closes first. */
+	function autocompleteOpen(): boolean {
+		const focused = tuiRef?.getFocusedComponent?.call(tuiRef);
+		try {
+			return typeof focused?.isShowingAutocomplete === "function" && focused.isShowingAutocomplete() === true;
+		} catch {
+			return false;
+		}
 	}
 
 	function installTui(ctx: ExtensionContext): void {
@@ -646,11 +705,20 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (ctx.mode !== "tui") return;
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 			const kb = getKeybindings();
-			if (kb.matches(data, "tui.input.submit") && editorText().trim() === "" && editorFocused() && putAway()) {
-				return { consume: true };
+			// Esc closes what is in front (docs/ux.md §3.2): the panel while it is on screen, then, as in Pi, the agent's
+			// run. A second Esc right after closing the panel is a double press, not a stop.
+			if (matchesKey(data, "escape") && editorFocused() && !autocompleteOpen()) {
+				if (panelOpen() && closePanel()) {
+					closedAt = Date.now();
+					return { consume: true };
+				}
+				if (Date.now() - closedAt < ESC_GUARD_MS) {
+					closedAt = Date.now();
+					return { consume: true };
+				}
 			}
 			// Pi's "more" key belongs to the panel only while the panel prints it.
-			const action = panelShown && !panel.hidden ? panelMore : undefined;
+			const action = panelOpen() ? panelMore : undefined;
 			if (action && kb.matches(data, "app.tools.expand") && editorFocused()) {
 				more(action);
 				return { consume: true };

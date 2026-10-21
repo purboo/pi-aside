@@ -27,6 +27,13 @@ function couldBecomeRoute(partial: string): boolean {
 	return ROUTE_FORMS.some((form) => form.startsWith(cleaned));
 }
 
+/** Whether the reply so far starts with a complete route line (the default `side` of `parseReply` does not count). */
+export function hasRouteLine(raw: string): boolean {
+	const text = raw.replace(/\r\n/g, "\n").replace(/^(?:[ \t]*\n)+/, "");
+	const newline = text.indexOf("\n");
+	return ROUTE_LINE.test(cleanLine(newline < 0 ? text : text.slice(0, newline)));
+}
+
 export function parseReply(raw: string, done: boolean): ParsedReply {
 	const text = raw.replace(/\r\n/g, "\n").replace(/^(?:[ \t]*\n)+/, "");
 	const newline = text.indexOf("\n");

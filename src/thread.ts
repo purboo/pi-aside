@@ -1,27 +1,28 @@
-// A side thread (docs/design.md §4.4, §4.5; docs/ux.md §3.2): questions and answers over one fork, read-only tools,
-// follow-ups that fork again when the main session has moved, and accounting.
+// A side thread (docs/design.md §4.4, §4.5; docs/ux.md §3.2, §3.9): questions, answers and side tasks over one fork,
+// with the session's callable tools, follow-ups that fork again when the main session has moved, and accounting.
 
-import { createFindTool, createGrepTool, createLsTool, createReadTool } from "@earendil-works/pi-coding-agent";
 import { type Fork, type ForkEnv, gainedSince, makeFork, type SendResult, send, type Tier } from "./fork.ts";
 import type { Observer } from "./observe.ts";
-import { parseReply, type ParsedReply } from "./reply.ts";
+import { hasRouteLine, parseReply, type ParsedReply } from "./reply.ts";
+import type { ToolExecutor, ToolUsage } from "./tools.ts";
 import type { UsageQueue } from "./usage.ts";
 
 // biome-ignore lint: Pi's message types are used structurally.
 type Any = any;
 
-export const MAX_TOOL_ROUNDS = 8;
-export const READ_ONLY_TOOLS = ["read", "grep", "find", "ls"] as const;
+export const MAX_TOOL_ROUNDS = 24;
+/** Built-in tools that only read: their calls pass as an activity line and are not kept as steps. */
+export const READING_TOOLS = ["read", "grep", "find", "ls"] as const;
 
 export function notice(options: { routeCheck: boolean }): string {
 	const lines = [
 		"<aside>",
-		"The user is asking this on the side, in a temporary side conversation. The main agent keeps working and does not see this exchange. Nothing said here reaches the main session unless the user sends it back.",
-		"Answer the question directly and briefly, in the language of the question. Only the read-only tools read, grep, find and ls run here; any other tool call fails.",
+		"The user is asking this on the side, in a temporary side conversation, while the main agent keeps working. The main agent does not see this exchange. Nothing said here reaches the main session unless the user sends it back.",
+		"Answer the question or do the task directly and briefly, in the language of the user's message. The main session's callable tools (including read, bash, edit, write, grep, find and ls when enabled) run here with the same validation and permission checks. Tools that Pi cannot call from another tool are unavailable here. Leave the main agent's own work alone: do not change the files, processes or state it is working on.",
 	];
 	if (options.routeCheck) {
 		lines.push(
-			"Start your reply with one line that is exactly `route: side` or `route: agent`. Write `route: agent` only when the message is really addressed to the main agent: it asks the agent to do, stop or change something (for example \"can you also add tests?\", or \"why are you deleting the tests?\" meaning stop). Otherwise write `route: side`, then answer.",
+			"Start your reply with one line that is exactly `route: side` or `route: agent`, before any tool call. Write `route: agent` only when the message is about the main agent's own work: it asks the agent to do, stop or change something in what it is doing (for example \"can you also add tests?\", or \"why are you deleting the tests?\" meaning stop). A question, or a task that is not part of the agent's work (for example checking disk space, or writing a note to a file), is `route: side`: answer it or do it here, after the route line.",
 		);
 	}
 	lines.push(
@@ -31,14 +32,22 @@ export function notice(options: { routeCheck: boolean }): string {
 	return lines.join("\n");
 }
 
+/** A finished call of a tool that may change something (bash, edit, write): what the aside did. */
+export interface Step {
+	label: string;
+	ok: boolean;
+}
+
 export interface TurnView {
 	question: string;
 	/** The answer text so far, route and handoff lines included. */
 	raw: string;
 	done: boolean;
 	error?: string;
-	/** A dim activity line, such as `reading src/a.ts`. */
+	/** A dim activity line, such as `reading src/a.ts` or `$ du -sh ~`. */
 	activity?: string;
+	/** Finished calls of tools that may change something, in order. */
+	steps: Step[];
 	/** The model's (summarized) thinking in the current request, while no answer text has arrived. */
 	thinking?: string;
 	/** When the question was asked, and when the answer's first text arrived (ms since the epoch). */
@@ -62,6 +71,8 @@ export interface ThreadHost {
 	usage: UsageQueue;
 	cwd: () => string;
 	sessionId: () => string;
+	/** Execute through the main session's validation and permission hooks; unavailable means fail closed. */
+	executeTool?: ToolExecutor;
 	onUpdate: () => void;
 }
 
@@ -81,7 +92,16 @@ function thinkingOf(message: Any): string {
 		.join("\n\n");
 }
 
-function activityFor(call: Any): string {
+/** The first non-empty line of a command, shortened, with `…` when more follows. */
+export function oneLine(text: unknown, max = 80): string {
+	const all = String(text ?? "").trim();
+	const first = all.split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
+	if (first.length > max) return `${first.slice(0, max - 1)}…`;
+	return all.includes("\n") ? `${first} …` : first;
+}
+
+/** What a tool call does, in a few words: the activity line while it runs, and the step it leaves. */
+export function activityFor(call: Any): string {
 	const args = call.arguments ?? {};
 	switch (call.name) {
 		case "read":
@@ -92,9 +112,32 @@ function activityFor(call: Any): string {
 			return `finding ${args.pattern ?? ""}`.trim();
 		case "ls":
 			return `listing ${args.path ?? "."}`;
+		case "bash":
+			return `$ ${oneLine(args.command)}`;
+		case "powershell":
+			return `PS> ${oneLine(args.command)}`;
+		case "edit":
+			return `edit ${args.path ?? ""}`.trim();
+		case "write":
+			return `write ${args.path ?? ""}`.trim();
 		default:
-			return `${call.name} is not available in an aside`;
+			return String(call.name);
 	}
+}
+
+function isReading(name: string): boolean {
+	return (READING_TOOLS as readonly string[]).includes(name);
+}
+
+function toolResult(call: Any, text: string, isError: boolean): Any {
+	return {
+		role: "toolResult",
+		toolCallId: call.id,
+		toolName: call.name,
+		content: [{ type: "text", text }],
+		isError,
+		timestamp: Date.now(),
+	};
 }
 
 /** Count the branch entries that put something into the model context. */
@@ -155,16 +198,19 @@ export class AsideThread {
 
 	/** Ask a question in this thread. Resolves when the answer is complete, failed or aborted. */
 	async ask(question: string, options: { routeCheck: boolean; onRoute?: (route: "side" | "agent") => void }): Promise<TurnView> {
-		const turn: TurnView = { question, raw: "", done: false, startedAt: Date.now(), cost: 0, read: 0, written: 0 };
+		this.controller?.abort();
+		const turn: TurnView = { question, raw: "", done: false, steps: [], startedAt: Date.now(), cost: 0, read: 0, written: 0 };
 		this.turns.push(turn);
 		const controller = new AbortController();
 		this.controller = controller;
 		const signal = controller.signal;
-		const update = () => this.host.onUpdate();
+		const update = () => {
+			if (this.controller === controller || turn.done) this.host.onUpdate();
+		};
 		let routeReported = false;
-		const reportRoute = () => {
-			if (routeReported || !options.onRoute) return;
-			const parsed = parseReply(turn.raw, turn.done);
+		const reportRoute = (complete = turn.done) => {
+			if (signal.aborted || turn.aborted || routeReported || !options.onRoute) return;
+			const parsed = parseReply(turn.raw, complete);
 			if (parsed.route) {
 				routeReported = true;
 				options.onRoute(parsed.route);
@@ -182,7 +228,9 @@ export class AsideThread {
 				const observation = this.host.observer.choose();
 				const why = latest && !latest.usable ? latest.reason : undefined;
 				turn.activity = undefined;
-				this.fork = await makeFork(this.host.env, observation, why);
+				const fork = await makeFork(this.host.env, observation, why);
+				signal.throwIfAborted();
+				this.fork = fork;
 				this.exchange = [];
 				this.observationSeq = observation?.seq;
 				this.contextCount = contextEntryCount(this.host.env.sessionManager);
@@ -198,11 +246,11 @@ export class AsideThread {
 				timestamp: Date.now(),
 			};
 			const added: unknown[] = [q];
-			const tools = this.tools();
 			let textBefore = "";
 			for (let round = 0; ; round++) {
+				signal.throwIfAborted();
 				const result: SendResult = await send(this.host.env, fork, [...this.exchange, ...added], signal, (event: Any) => {
-					if (event?.partial) {
+					if (!signal.aborted && event?.partial) {
 						turn.raw = textBefore + textOf(event.partial);
 						turn.thinking = thinkingOf(event.partial) || undefined;
 						if (turn.firstTextAt === undefined && turn.raw.trim() !== "") turn.firstTextAt = Date.now();
@@ -224,23 +272,39 @@ export class AsideThread {
 					turn.error = message.errorMessage ?? "the request failed";
 					break;
 				}
-				reportRoute();
-				if (routeReported && parseReply(turn.raw, false).route === "agent") break;
+				signal.throwIfAborted();
+				// The response is complete even if its route line has no trailing newline.
+				const route = hasRouteLine(turn.raw) ? parseReply(turn.raw, true).route : undefined;
+				reportRoute(true);
+				if (route === "agent") break;
+				signal.throwIfAborted();
 				const calls = (message.content ?? []).filter((c: Any) => c?.type === "toolCall");
 				if (calls.length === 0 || message.stopReason !== "toolUse") break;
 				if (round + 1 >= MAX_TOOL_ROUNDS) {
 					turn.error = `stopped after ${MAX_TOOL_ROUNDS} tool rounds`;
 					break;
 				}
+				// Routing happens before any tool: even a familiar tool name may have a session override.
+				const unrouted = options.routeCheck && route !== "side";
 				for (const call of calls) {
+					signal.throwIfAborted();
+					if (unrouted) {
+						added.push(toolResult(call, "Not run: start your reply with the route line (`route: side` or `route: agent`), then call tools.", true));
+						continue;
+					}
 					turn.activity = activityFor(call);
 					update();
-					added.push(await this.runTool(tools, call, signal));
+					signal.throwIfAborted();
+					const outcome = await this.runTool(call, signal, turn);
+					if (signal.aborted) throw new DOMException("aborted", "AbortError");
+					if (!isReading(call.name)) turn.steps.push({ label: activityFor(call), ok: !outcome.isError });
+					added.push(outcome);
 				}
 				turn.activity = undefined;
 				if (textBefore && !textBefore.endsWith("\n")) textBefore += "\n\n";
 				update();
 			}
+			signal.throwIfAborted();
 			this.exchange.push(...added);
 		} catch (error) {
 			if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
@@ -259,41 +323,41 @@ export class AsideThread {
 		return turn;
 	}
 
-	private tools(): Record<string, Any> {
-		const cwd = this.host.cwd();
-		return {
-			read: createReadTool(cwd),
-			grep: createGrepTool(cwd),
-			find: createFindTool(cwd),
-			ls: createLsTool(cwd),
-		};
-	}
-
-	private async runTool(tools: Record<string, Any>, call: Any, signal: AbortSignal): Promise<unknown> {
-		const result = (content: string, isError: boolean) => ({
-			role: "toolResult",
-			toolCallId: call.id,
-			toolName: call.name,
-			content: [{ type: "text", text: content }],
-			isError,
-			timestamp: Date.now(),
-		});
-		const tool = (READ_ONLY_TOOLS as readonly string[]).includes(call.name) ? tools[call.name] : undefined;
-		if (!tool) return result(`${call.name} is not available in an aside. Only read, grep, find and ls run here.`, true);
+	private async runTool(call: Any, signal: AbortSignal, turn: TurnView): Promise<Any> {
 		try {
-			const args = tool.prepareArguments ? tool.prepareArguments(call.arguments) : call.arguments;
-			const output = await tool.execute(call.id, args, signal);
+			signal.throwIfAborted();
+			if (!this.host.executeTool) return toolResult(call, "Tool execution through Pi's session hooks is unavailable.", true);
+			const outcome = await this.host.executeTool(call.name, call.arguments, signal, (result) => this.accountTool(result, turn));
 			return {
+				...outcome.result,
 				role: "toolResult",
 				toolCallId: call.id,
 				toolName: call.name,
-				content: output?.content ?? [],
-				isError: false,
+				content: outcome.result.content ?? [],
+				isError: outcome.isError,
 				timestamp: Date.now(),
 			};
 		} catch (error) {
-			return result(error instanceof Error ? error.message : String(error), true);
+			return toolResult(call, error instanceof Error ? error.message : String(error), true);
 		}
+	}
+
+	private accountTool({ toolName, usage }: ToolUsage, turn: TurnView): void {
+		// Paid results remain paid after abort. Never add outcome.result.usage again: the executor
+		// reports both the direct tool and its descendants through this callback exactly once.
+		turn.cost += usage.cost.total;
+		turn.read += usage.cacheRead;
+		turn.written += usage.cacheWrite;
+		if (!(usage.input || usage.output || usage.cacheRead || usage.cacheWrite || usage.cost.total)) return;
+		this.host.usage.push({
+			sessionId: this.sessionId,
+			// Tool usage has no provider/model fields. Match Pi's native tool-result cost bucket.
+			provider: "Tools",
+			model: "summaries",
+			usage,
+			note: `pi-aside tier=${turn.tier} tool=${JSON.stringify(toolName)} read=${usage.cacheRead} written=${usage.cacheWrite}`,
+		});
+		this.host.onUpdate();
 	}
 
 	private account(fork: Fork, result: SendResult, turn: TurnView): void {

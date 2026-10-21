@@ -41,18 +41,29 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | Anything without a final question mark | Pi's meaning: a steer while running, a prompt while idle. |
 | Alt+Enter | Pi's meaning: a follow-up. |
 | Another `?` message while the answer is shown | Follows up in the same side conversation. The hint says `↵ follows up on the side`, the panel's title becomes your new question, and one dim line names the one before. |
-| A `?` message after the answer was folded or cleared | A fresh side conversation (`↵ asks on the side`). |
-| Send anything to the agent | The answer folds to one dim line. |
-| Enter on an empty editor | Puts the answer away: first it folds to one dim line (`↵ folds`), then that line goes (`↵ clears`). |
+| A `?` message after the panel was closed | A fresh side conversation (`↵ asks on the side`). |
+| Send anything to the agent | The panel stays open until you close it. |
+| Enter on an empty editor | Keeps Pi's behavior; the panel stays open. |
 | ctrl+o where a long answer shows `↓ 12 more lines · ctrl+o` | Opens the whole conversation in a reader. Everywhere else ctrl+o keeps Pi's meaning (tool output). |
 | Typing in the reader | Closes it and goes on in the editor; the panel opens again, so a `?` follows up. |
 | `/aside <question>` | Asks on the side, busy or not. |
 | `/aside` | Opens the latest side conversation in the reader, at the latest question. Esc closes it. |
 | Tab on an empty editor when `⇥ suggestion` is shown | Accepts the aside's suggested instruction for the agent. Enter sends it, with the side Q&A attached as a note. |
-| Esc | Pi's meaning: aborts the agent. pi-aside never takes focus. |
+| Esc with the panel open | Closes the aside and cancels its work; the main agent keeps going. A second Esc within 500 ms is ignored. With no aside open, Esc keeps Pi's behavior. |
+| Swipe or wheel over the panel | Scrolls the aside. Outside it, Pi's scrolling. Requires fullscreen mode and a terminal that reports mouse events. |
+| Tap or click ✕ | Closes the panel or reader (fullscreen). |
+| Tap or click a “more lines” count | Opens the reader (fullscreen). |
 
-A question mark does not always make a message a question: `can you also add tests?` is a request. The aside model
-starts its reply with a hidden route line. When the message is really addressed to the agent, pi-aside sends your
+An aside can also do an independent task: `/aside check disk usage` or `/aside write this feedback to notes/tool.md`.
+It uses the session's callable tools through Pi's validation and permission hooks, with no extra approval flow.
+Finished shell, edit and write calls leave concise steps in the panel. Tools share the workspace; closing the
+aside cancels further work but does not undo completed changes. Pi's `model-only` tools cannot run through its
+nested-tool API. This API also requires an existing main assistant response: immediately after starting a blank
+session, let the main agent answer once before asking an aside to run tools.
+
+A question mark does not always make a message a question: `can you also add tests?` may concern the main agent's
+current task. The aside model starts its reply with a hidden route line. Independent tasks stay on the side;
+when the message is about changing the main agent's current work, pi-aside sends your
 original text as a steer, which is what Enter would have done without it, and says so:
 `↪ sent to the agent · it reads as a correction`.
 
@@ -83,7 +94,8 @@ read the cache.
 
 - Exact forks work for `anthropic-messages`, `openai-responses` and `openai-completions` over HTTP/SSE. Other APIs
   and stateful transports use the rebuilt path.
-- The aside gets the read-only tools `read`, `grep`, `find` and `ls`, at most 8 rounds.
+- The aside uses the session's callable tools, at most 24 rounds per question. Disabled tools stay disabled;
+  Pi's existing overrides, argument validation and tool hooks apply.
 - Each aside request adds one usage entry to the session file once the agent is idle, so `/session` costs stay
   complete.
 

@@ -194,10 +194,10 @@ describe("tool rounds", () => {
 		await pi.waitForAgentEnd(1);
 	}, 60_000);
 
-	test("the aside runs read-only tools and refuses others; continuation requests stay exact", async () => {
+	test("the aside runs Pi's built-in tools and refuses others; continuation requests stay exact", async () => {
 		server = await startCaptureServer();
 		pi = await startPi({ baseUrl: server.url, api: "anthropic", extensions: [PROBE, ASIDE] });
-		const { writeFileSync, existsSync } = await import("node:fs");
+		const { writeFileSync, readFileSync, existsSync } = await import("node:fs");
 		writeFileSync(join(pi.cwd, "a.txt"), "alpha content\n");
 		server.enqueue({ text: "Hi.", usage: { input: 40, cacheWrite: 800 } });
 		await pi.prompt("hi");
@@ -207,23 +207,29 @@ describe("tool rounds", () => {
 				text: "route: side\nLet me look.",
 				toolCalls: [
 					{ id: "toolu_r", name: "read", arguments: { path: "a.txt" } },
-					{ id: "toolu_w", name: "bash", arguments: { command: "touch pwned.txt" } },
+					{ id: "toolu_b", name: "bash", arguments: { command: "echo made > made.txt" } },
+					{ id: "toolu_w", name: "write", arguments: { path: "notes/feedback.md", content: "# Feedback\n" } },
+					{ id: "toolu_s", name: "subagents", arguments: { action: "run" } },
 				],
 				usage: { input: 10, cacheRead: 800 },
 			},
-			{ text: "It says alpha.", usage: { input: 10, cacheRead: 850 } },
+			{ text: "It says alpha; I wrote the note.", usage: { input: 10, cacheRead: 850 } },
 		);
-		await pi.prompt("/aside what is in a.txt?");
+		await pi.prompt("/aside what is in a.txt? write a note too");
 		const done = await asideDone(pi);
 		expect(done.error).toBeUndefined();
 		expect(done.tier).toBe("exact");
-		expect(done.answer).toContain("It says alpha.");
-		expect(existsSync(join(pi.cwd, "pwned.txt"))).toBe(false);
+		expect(done.answer).toContain("It says alpha");
+		expect(readFileSync(join(pi.cwd, "made.txt"), "utf8")).toBe("made\n");
+		expect(readFileSync(join(pi.cwd, "notes/feedback.md"), "utf8")).toBe("# Feedback\n");
+		expect(existsSync(join(pi.cwd, "a.txt"))).toBe(true);
 		const second = server.requests[2]!;
 		const text = JSON.stringify(second.body);
 		expect(text).toContain("alpha content");
-		expect(text).toContain("not available in an aside");
+		expect(text).toContain("subagents is not available in an aside");
 		expectExtends("anthropic", second.body, server.requests[0]!.body);
+		// The main session never sees the aside's tool calls.
+		expect(JSON.stringify(pi.sessionEntries())).not.toContain("toolu_b");
 		await pi.waitFor(() => pi!.sessionEntries().filter((e) => e.type === "usage" && e.kind === "aside").length === 2 || undefined, 5000, "two usage entries");
 	}, 60_000);
 });
