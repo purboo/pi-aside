@@ -150,7 +150,12 @@ knows from shells and IDEs: dim suggested text that Tab accepts.
 ```
 
 - The aside model is told in its notice to end with an optional one-line `handoff`, and only when the question
-  implies a change to the agent's work. Without a handoff line, no ghost text appears.
+  implies a change to the agent's work, or the user asks it to pass something on ("tell the agent what we
+  found"). Without a handoff line, no ghost text appears.
+- Relaying is the same gesture, not a second channel. A relay request is `route: side`: forwarding the words
+  verbatim would reach an agent that never saw the conversation. The aside writes the self-contained message in
+  its answer, which becomes the side note, and the handoff line points the agent at it. The aside cannot send
+  anything itself; the user's Tab and Enter decide whether and when the agent is interrupted.
 - **Tab** on an empty editor accepts the suggestion into the editor, using Pi's existing autocomplete meaning. The
   user can edit it. **Enter** sends it with Pi's meaning: a steer while running, the next prompt while idle.
 - A sent handoff carries the side Q&A as a custom message next to it, so the agent gets the reasoning as well.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+- Asking the aside to pass something on to the main agent ("tell it what we found") now produces a handoff: the
+  aside writes a self-contained message from the side conversation, and Tab then Enter sends it with the side
+  note. Such requests stay in the aside instead of reaching an agent that never saw the conversation.
+
 ## 0.4.0
 
 - Esc closes the aside panel and cancels its work while the main agent keeps going. A quick second Esc is
