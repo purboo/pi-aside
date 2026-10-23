@@ -281,6 +281,9 @@ describe("placeholders, notice, money", () => {
 		expect(notice({ routeCheck: true })).toContain("before any tool call");
 		expect(notice({ routeCheck: true })).toContain("not part of the agent's work");
 		expect(notice({ routeCheck: false })).toContain("bash");
+		expect(notice({ routeCheck: true })).toContain("pass something from this side conversation on to the main agent");
+		expect(notice({ routeCheck: false })).toContain("the user asks you to pass something on");
+		expect(notice({ routeCheck: false })).toContain("you cannot message the agent yourself");
 	});
 
 	test("a route line counts only when written out", () => {

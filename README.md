@@ -48,7 +48,7 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | Typing in the reader | Closes it and goes on in the editor; the panel opens again, so a `?` follows up. |
 | `/aside <question>` | Asks on the side, busy or not. |
 | `/aside` | Opens the latest side conversation in the reader, at the latest question. Esc closes it. |
-| Tab on an empty editor when `⇥ suggestion` is shown | Accepts the aside's suggested instruction for the agent. Enter sends it, with the side Q&A attached as a note. |
+| Tab on an empty editor when `⇥ suggestion` is shown | Accepts the aside's suggested instruction for the agent. Enter sends it, with the side Q&A attached as a note. Ask the aside to "tell the agent …" to get one on purpose. |
 | Esc with the panel open | Closes the aside and cancels its work; the main agent keeps going. A second Esc within 500 ms is ignored. With no aside open, Esc keeps Pi's behavior. |
 | Swipe or wheel over the panel | Scrolls the aside. Outside it, Pi's scrolling. Requires fullscreen mode and a terminal that reports mouse events. |
 | Tap or click ✕ | Closes the panel or reader (fullscreen). |

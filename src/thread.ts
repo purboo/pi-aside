@@ -22,11 +22,12 @@ export function notice(options: { routeCheck: boolean }): string {
 	];
 	if (options.routeCheck) {
 		lines.push(
-			"Start your reply with one line that is exactly `route: side` or `route: agent`, before any tool call. Write `route: agent` only when the message is about the main agent's own work: it asks the agent to do, stop or change something in what it is doing (for example \"can you also add tests?\", or \"why are you deleting the tests?\" meaning stop). A question, or a task that is not part of the agent's work (for example checking disk space, or writing a note to a file), is `route: side`: answer it or do it here, after the route line.",
+			"Start your reply with one line that is exactly `route: side` or `route: agent`, before any tool call. Write `route: agent` only when the message is about the main agent's own work: it asks the agent to do, stop or change something in what it is doing (for example \"can you also add tests?\", or \"why are you deleting the tests?\" meaning stop). A question, or a task that is not part of the agent's work (for example checking disk space, or writing a note to a file), is `route: side`: answer it or do it here, after the route line. A request to pass something from this side conversation on to the main agent (for example \"tell the agent what we found\") is also `route: side`: the agent has not seen this conversation.",
 		);
 	}
 	lines.push(
-		"If, and only if, your answer shows that the main agent should change what it is doing, end with one line `handoff: <one short instruction to the agent, in the user's language>`. Otherwise do not write that line.",
+		"If the user asks you to pass something on to the main agent (tell it, let it know, relay, forward), write in your answer the self-contained message the agent needs, including the relevant findings from this conversation, and end with the handoff line below. The user sends it; you cannot message the agent yourself.",
+		"End with one line `handoff: <one short instruction to the agent, in the user's language>` if, and only if, the user asks you to pass something on, or your answer shows that the main agent should change what it is doing. Otherwise do not write that line.",
 		"</aside>",
 	);
 	return lines.join("\n");
