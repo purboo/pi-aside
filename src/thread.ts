@@ -11,10 +11,6 @@ import type { UsageQueue } from "./usage.ts";
 type Any = any;
 
 export const MAX_TOOL_ROUNDS = 24;
-export const INTERNAL_TOOLS = [
-	{ name: "tell_agent", description: "Relay a self-contained message to the main agent ONLY on the user's explicit request.", parameters: { type: "object", properties: { message: { type: "string" } }, required: ["message"], additionalProperties: false } },
-	{ name: "move_out", description: "Move this aside to its own Pi window ONLY on the user's explicit request.", parameters: { type: "object", properties: { name: { type: "string" }, hint: { type: "string" } }, additionalProperties: false } },
-];
 /** Built-in tools that only read: their calls pass as an activity line and are not kept as steps. */
 export const READING_TOOLS = ["read", "grep", "find", "ls"] as const;
 
@@ -30,9 +26,10 @@ export function notice(options: { routeCheck: boolean }): string {
 		);
 	}
 	lines.push(
-		"Call tell_agent({message}) ONLY when the user's latest message explicitly asks you to tell/pass/relay something to the main agent, in any language. Never on your own initiative. The message must be self-contained: the main agent never saw this aside conversation. You can reach the agent with this tool; never claim you cannot. Its result tells you whether delivery is queued or read, so a brief confirmation is enough.",
-		"Call move_out({name, hint}) ONLY on an explicit request to move this aside to its own window. Choose 2–3 lowercase English words in kebab case for name. For hint, write one short placeholder sentence in the same language as the user's messages here, such as \"tell the agent when you're done\" for English. Do not make a separate naming request.",
-		"You may end with one hidden last line `next: <what the user would say next>` only when there is an obvious next step; usually omit it. One short sentence, in the user's words and conversation language. Never add the /aside prefix. You may suggest telling the agent, but do not send without an explicit request.",
+		"Your reply may end with hidden action lines, each on its own line after the visible text. The user does not see them; the side conversation acts on them when your reply ends. They are not tools: never call a tool for them.",
+		"`tell: <message>` relays one self-contained line to the main agent. Write it ONLY when the user's latest message explicitly asks you to tell/pass/relay something to the main agent, in any language. Never on your own initiative. The main agent never saw this aside conversation, so include what it needs. This line is how you reach the agent: never claim you cannot. The user sees the delivery status, so a brief confirmation in the visible text is enough.",
+		"`move: <name> | <hint>` moves this aside to its own Pi window. Write it ONLY on an explicit request to move this aside out. name is 2–3 lowercase English words in kebab case; hint is one short placeholder sentence in the same language as the user's messages here, such as \"tell the agent when you're done\" for English. Do not make a separate naming request. Unfinished tool work continues in the new window.",
+		"`next: <what the user would say next>` only when there is an obvious next step; usually omit it. One short sentence, in the user's words and conversation language. Never add the /aside prefix. You may suggest telling the agent, but do not send without an explicit request.",
 		"After a round-limit tool result, summarize done ✓ and left …, then stop with a next: line suggesting continuation. If much work remains, suggest moving this to its own window instead.",
 		"</aside>",
 	);
@@ -116,10 +113,6 @@ export function oneLine(text: unknown, max = 80): string {
 export function activityFor(call: Any): string {
 	const args = call.arguments ?? {};
 	switch (call.name) {
-		case "move_out":
-			return "moving to its own window…";
-		case "tell_agent":
-			return "telling the agent";
 		case "read":
 			return `reading ${args.path ?? ""}`.trim();
 		case "grep":
@@ -278,8 +271,9 @@ export class AsideThread {
 				content: [{ type: "text", text: `${notice(options)}\n\n${prefix}${question}` }],
 				timestamp: Date.now(),
 			};
-			// The aside's own tools are added once per fork, after the shared prefix, so the main session's cache still applies.
-			const added: unknown[] = this.exchange.length === 0 ? [{ role: "system", content: "", toolsAdded: INTERNAL_TOOLS, timestamp: Date.now() }, q] : [q];
+			// The aside declares no tools of its own: added declarations would change the request's tool list on providers
+			// without inline tool additions, and the main session's cache would not apply. Actions are reply lines.
+			const added: unknown[] = [q];
 			this.history.push({ role: "user", content: question, timestamp: Date.now() });
 			let summary = false;
 			let textBefore = "";
@@ -315,6 +309,7 @@ export class AsideThread {
 				reportRoute(true);
 				if (route === "agent") break;
 				signal.throwIfAborted();
+				if (!options.routeCheck || route === "side") this.act(parseReply(textOf(message), true), turn);
 				const calls = (message.content ?? []).filter((c: Any) => c?.type === "toolCall");
 				if (calls.length === 0 || message.stopReason !== "toolUse") break;
 				if (summary) {
@@ -348,7 +343,7 @@ export class AsideThread {
 					const skippedForFollowup = this.pauseRequested;
 					const outcome = await this.runTool(call, signal, turn);
 					if (signal.aborted) throw new DOMException("aborted", "AbortError");
-					if (!skippedForFollowup && !isReading(call.name) && !["tell_agent", "move_out"].includes(call.name)) turn.steps.push({ label: activityFor(call), ok: !outcome.isError });
+					if (!skippedForFollowup && !isReading(call.name)) turn.steps.push({ label: activityFor(call), ok: !outcome.isError });
 					added.push(outcome);
 					this.history.push(outcome);
 				}
@@ -387,6 +382,12 @@ export class AsideThread {
 		return turn;
 	}
 
+	/** Carry out a reply's action lines: relay at once (one relay per turn), and move out after its tool calls are skipped. */
+	private act(parsed: ParsedReply, turn: TurnView): void {
+		if (parsed.tell && !turn.relays?.length && this.host.tellAgent) (turn.relays ??= []).push(this.host.tellAgent(parsed.tell));
+		if (parsed.move && this.host.moveOut && !this.promotion) this.promotion = parsed.move;
+	}
+
 	private async runTool(call: Any, signal: AbortSignal, turn: TurnView): Promise<Any> {
 		try {
 			signal.throwIfAborted();
@@ -394,19 +395,6 @@ export class AsideThread {
 			if (this.promotion) {
 				this.unfinished = true;
 				return toolResult(call, "Not run: continuing in the new window.", true);
-			}
-			if (call.name === "tell_agent") {
-				const message = call.arguments?.message;
-				if (typeof message !== "string" || !message.trim()) return toolResult(call, "message must be a non-empty string", true);
-				if (!this.host.tellAgent) return toolResult(call, "Delivery is unavailable.", true);
-				const relay = this.host.tellAgent(message.trim());
-				(turn.relays ??= []).push(relay);
-				return toolResult(call, relay.read ? "Delivered. It has read this." : "Queued. It will see this after its current step.", false);
-			}
-			if (call.name === "move_out") {
-				if (!this.host.moveOut) return toolResult(call, "Moving out is unavailable.", true);
-				this.promotion = { name: call.arguments?.name, hint: call.arguments?.hint };
-				return toolResult(call, "Moving to its own window.", false);
 			}
 			if (!this.host.executeTool) return toolResult(call, "Tool execution through Pi's session hooks is unavailable.", true);
 			const outcome = await this.host.executeTool(call.name, call.arguments, signal, (result) => this.accountTool(result, turn));

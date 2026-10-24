@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Fixed: on models without inline tool additions (such as Anthropic-compatible providers with
+  `supportsMidConvoToolChanges: false`), every new aside rebuilt the whole context
+  (`rebuilt: not expected to hit (the fork changed tools)`). Relaying and moving out are now hidden reply
+  lines, `tell:` and `move:`, so the aside declares no tools and reads the main session's cache again.
+- A moved-out window sees earlier relays as its own `tell_agent` calls, so its model no longer denies them.
+
 ## 0.5.0
 
 - Ask the aside to tell the main agent: its internal `tell_agent` tool sends a self-contained steer without

@@ -39,21 +39,28 @@ export function writePromotedSession(options: { cwd: string; branch: Any[]; hist
 	const child = SessionManager.open(file);
 	const context = child.buildSessionContext().messages;
 	for (const placeholder of withPlaceholders(context).slice(context.length)) child.appendMessage(placeholder as Any);
+	let relays = 0;
 	for (const original of options.history) {
 		const message = structuredClone(original);
+		const told: string[] = [];
 		if (message.role === "assistant") {
 			message.content = message.content.flatMap((part: Any) => {
 				if (part.type !== "text") return [part];
-				const text = parseReply(part.text, true).body;
+				const reply = parseReply(part.text, true);
+				if (reply.tell) told.push(reply.tell);
+				// Without tell_agent in the new window, a delivered relay stays in words.
+				const text = [reply.body, reply.tell && !options.relay ? `[Delivered to the main agent: ${reply.tell}]` : ""].filter(Boolean).join("\n\n");
 				return text ? [{ ...part, text }] : [];
 			});
 		}
-		// The new window has no move_out tool: say plainly that the move happened, and where the conversation is now.
-		if (message.role === "toolResult" && message.toolName === "move_out" && !message.isError) {
-			message.content = [{ type: "text", text: `Moved: this conversation now continues in its own Pi window, aside:${options.name}. You are in that window, and move_out is no longer needed.${options.relay ? " To reach the original agent, use tell_agent when the user asks." : ""}` }];
-		}
+		// A relay that already happened becomes the new window's own tell_agent call, or its model disowns it.
+		const calls = options.relay ? told.map(tell => ({ type: "toolCall", id: `aside_relay_${++relays}`, name: "tell_agent", arguments: { message: tell } })) : [];
+		if (calls.length) { message.content.push(...calls); message.stopReason = "toolUse"; }
 		child.appendMessage(message);
+		for (const call of calls) child.appendMessage({ role: "toolResult", toolCallId: call.id, toolName: "tell_agent", content: [{ type: "text", text: "Delivered to the parent agent." }], isError: false, timestamp: message.timestamp } as Any);
 	}
+	// Say plainly that the move happened and where the conversation is now, or the new window's model disowns it.
+	child.appendCustomMessageEntry("aside-moved", `Moved: this conversation now continues in its own Pi window, aside:${options.name}. You are in that window; the move is done.${options.relay ? " To reach the original agent, use tell_agent when the user asks." : ""}`, false);
 	child.appendSessionInfo(`aside:${options.name}`);
 	return file;
 }
