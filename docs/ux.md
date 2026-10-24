@@ -149,7 +149,7 @@ Code adds `/aside `, so Tab then Enter always sends it to the aside. For example
 - Sanitize to one trimmed line, at most 80 visible columns with an ellipsis; discard a suggestion beginning with `/`.
 
 When the user's latest message explicitly asks to tell/pass/relay something to the main agent, in any language,
-the aside calls its internal `tell_agent({message})` tool. It never sends on its own initiative. It may suggest
+the aside ends its reply with a hidden `tell: <message>` line. It never sends on its own initiative. It may suggest
 asking for a relay through `next:`. The relay is self-contained because the main agent has not seen the aside.
 Relay requests stay `route: side`; the aside must never claim it cannot reach the agent.
 
@@ -278,19 +278,20 @@ When much remains, suggest moving out instead. A new follow-up waits for an acti
 
 ### 3.10 Move into a separate Pi
 
-On the user's explicit request, the aside calls internal `move_out({name?, hint?})`. The model chooses 2–3 lowercase
+On the user's explicit request, the aside ends its reply with a hidden `move: <name> | <hint>` line. The model chooses 2–3 lowercase
 English words in kebab case and one placeholder sentence in the conversation language. There is no extra naming
 request. Invalid or missing values become `aside-N` and `tell the agent when you're done`.
 
-- Finish the current tool, then stop the thread. Show `moving to its own window…` during the move.
+- Finish the current tool, skip the answer's remaining tool calls, then stop the thread. Show `moving to its own window…` during the move.
 - Write a normal Pi session next to the main session (its session directory). Preserve the main branch at the initial aside
-  fork, then every aside question, answer, tool call and result as ordinary messages. Strip route/next protocol.
+  fork, then every aside question, answer, tool call and result as ordinary messages. Strip the route and action lines;
+  a delivered `tell:` becomes the new window's own `tell_agent` call and result (or a bracketed note without tmux).
   Set the session name to `aside:<name>`, discoverable with `pi -r`.
 - With `$TMUX` and `$TMUX_PANE`, insert a new window immediately after the originating pane's window, use the same
   cwd, and select it. Resolve duplicate window names with `-2`, `-3`, etc. The window and session share the name.
   Start `pi --session <file>`. Only when the move skipped tool calls of the same answer does the new window go on
   by itself (an initial `continue`); finished work just waits for the user. Do not kill running tools. The moved
-  transcript replaces the `move_out` result with a plain statement that the move happened and where it is now.
+  transcript ends with a hidden note that the move happened and where the conversation is now.
 - Without tmux, copy `pi --session <file>` and show `Copied: pi --session … — paste it in any terminal.`
   If clipboard copying fails, show the command without claiming it was copied. The exported thread is retired;
   the next aside is fresh.
@@ -310,7 +311,7 @@ request. Invalid or missing values become `aside-N` and `tell the agent when you
 |---|---|
 | Submitted question routing | `input`, `ctx.isIdle()`, `pi.sendUserMessage` |
 | Existing tool validation/permissions | Private session executor bridge through `ctx.executeTool` |
-| Internal tools without main tools | Appended `SystemMessage.toolsAdded`; handled within the aside thread |
+| Relay and move without new tools | Hidden reply lines `tell:` / `move:`; the fork's tool list stays the main one's |
 | Direct relay | `pi.sendMessage`, `deliverAs: "steer"`, `triggerTurn: true`, `message_start` |
 | Transcript prefixes | `pi.registerMessageRenderer` |
 | Display-only window link | `pi.appendEntry`, `pi.registerEntryRenderer`; custom entries are excluded from context |

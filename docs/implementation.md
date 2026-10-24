@@ -160,12 +160,16 @@ bridge scope remains bounded even when Pi's nested recorder reaches its call lim
 
 ### 2.10 Relays and consumption (0.5.0)
 
-`src/thread.ts` adds `tell_agent` and `move_out` as one appended `SystemMessage.toolsAdded` definition per fork
-(declaring a name again counts as a redefinition for addition-only transports and would refold the tool list,
-losing the cache). They are
-handled before the session executor, including in blank sessions and when the main has no tools. The notice
-restricts them to an explicit latest user request and requires self-contained relay text. There is no separate
-language-specific intent heuristic. The route-before-tool guard still covers both internal tools.
+Relaying and moving out are hidden reply lines, `tell: <message>` and `move: <name> | <hint>`, parsed like
+`next:` (`src/reply.ts`). 0.5.0 declared them as tools through an appended `SystemMessage.toolsAdded`. On transports
+without inline tool additions (for example Anthropic-compatible models with `supportsMidConvoToolChanges: false`)
+pi-ai folds such declarations into the request's top-level `tools`, so every first question of a fork rebuilt the
+whole prefix (`rebuilt: … the fork changed tools`) instead of reading the main session's cache. 0.5.1 declares
+nothing: the fork's tool list is the main one's on every transport. The lines work in blank sessions and when the
+main has no tools. They are acted on when each response ends, only under `route: side` when a route is required:
+one relay per answer at once, and a move after the response's remaining tool calls are skipped. The notice
+restricts both to an explicit latest user request and requires self-contained relay text. There is no separate
+language-specific intent heuristic.
 
 `pi.sendMessage({customType: "aside", content, display: true, details}, {triggerTurn: true, deliverAs: "steer"})`
 uses Pi's native queue. Verified in `agent-session.js:sendCustomMessage`: streaming goes through `agent.steer`
@@ -204,7 +208,7 @@ placeholder results as the fork, keeping the exported context valid. Names use `
 round-trip and list tests verify resumability and discovery in the normal cwd session directory.
 
 An incoming follow-up waits for the current aside tool to finish, skips remaining calls and yields before another request; it never aborts that tool to move.
-`move_out` runs in sequence after earlier tools and stops further calls before exporting. Only when that skipped
+A `move:` line skips the tool calls of its own response and stops further requests before exporting. Only when that skipped
 later calls of the same answer is the child started with `continue`; a real tmux trial showed that a `continue`
 after finished work made the child's model disown the move. tmux has no pane targets for `new-window`
 ("can't specify pane here"): `display-message -t $TMUX_PANE '#{window_id}'` finds the window, and

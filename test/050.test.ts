@@ -14,6 +14,20 @@ const temp = () => { const dir = mkdtempSync(join(tmpdir(), "aside-050-")); dirs
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 const theme = { fg: (_color: string, text: string) => text };
 
+test("tell and move are hidden reply lines, in any order, hidden while they stream", () => {
+	const done = parseReply("route: side\nPassed on.\ntell: Keep the routing tests.\nnext: tell it when done", true);
+	expect(done).toMatchObject({ route: "side", body: "Passed on.", tell: "Keep the routing tests.", next: "tell it when done" });
+	expect(parseReply("Moving.\n**move:** disk-cleanup | 完成后告诉 agent", true)).toMatchObject({ body: "Moving.", move: { name: "disk-cleanup", hint: "完成后告诉 agent" } });
+	expect(parseReply("Moving.\nmove: disk-cleanup", true).move).toEqual({ name: "disk-cleanup" });
+	const streaming = parseReply("route: side\nPassed on.\ntell: Keep the rou", false);
+	expect(streaming.body).toBe("Passed on.");
+	expect(streaming.tell).toBeUndefined();
+	expect(parseReply("route: side\nPassed on.\nte", false).body).toBe("Passed on.");
+	const prose = parseReply("tell: me more about it\nThat is all.", true);
+	expect(prose.body).toBe("tell: me more about it\nThat is all.");
+	expect(prose.tell).toBeUndefined();
+});
+
 test("next suggestions hide during streaming and sanitize commands, control codes and wide columns", () => {
 	expect(parseReply("route: side\nDone.\nnext: keep going", false).body).toBe("Done.");
 	expect(parseReply("route: side\nDone.\nne", false).body).toBe("Done.");
@@ -26,7 +40,7 @@ test("next suggestions hide during streaming and sanitize commands, control code
 	expect(renderBelow({ hint: undefined, next: "继续" }, 100, theme)).toEqual(["/aside 继续"]);
 });
 
-test("internal tools require the latest explicit request, self-contained relay, and move-out naming without another request", () => {
+test("tell and move lines require the latest explicit request, self-contained relay, and move-out naming without another request", () => {
 	const text = notice({ routeCheck: true });
 	expect(text).toContain("ONLY when the user's latest message explicitly asks");
 	expect(text).toContain("Never on your own initiative");
@@ -35,6 +49,7 @@ test("internal tools require the latest explicit request, self-contained relay, 
 	expect(text).toContain("ONLY on an explicit request to move");
 	expect(text).toContain("Do not make a separate naming request");
 	expect(text).toContain("before any tool call");
+	expect(text).toContain("They are not tools");
 });
 
 test("panel touch targets: close and its adjacent cells, row below, only count text reads", () => {
@@ -77,17 +92,22 @@ test("promotion writes a normal session, preserving the fork branch and tools, s
 	expect(JSON.stringify(child.buildSessionContext())).toBe(context);
 });
 
-test("the new window's transcript says the move happened, so its model does not disown move_out", () => {
+test("the new window's transcript says the move happened, so its model does not disown it", () => {
 	const dir = temp();
-	const call = { type: "toolCall", id: "m", name: "move_out", arguments: { name: "disk-cleanup" } };
-	const assistant = { role: "assistant", content: [{ type: "text", text: "route: side\n" }, call], timestamp: 2, api: "anthropic-messages", provider: "test", model: "test", stopReason: "toolUse", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
-	const history = [{ role: "user", content: "move this out", timestamp: 1 }, assistant, { role: "toolResult", toolCallId: "m", toolName: "move_out", content: [{ type: "text", text: "Moving to its own window." }], isError: false, timestamp: 3 }];
+	const assistant = { role: "assistant", content: [{ type: "text", text: "route: side\nMoving it.\nmove: disk-cleanup | Tell the agent when done" }], timestamp: 2, api: "anthropic-messages", provider: "test", model: "test", stopReason: "stop", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+	const told = { ...assistant, content: [{ type: "text", text: "route: side\nPassed on.\ntell: Keep the routing tests." }] };
+	const history = [{ role: "user", content: "tell the agent", timestamp: 0 }, told, { role: "user", content: "move this out", timestamp: 1 }, assistant];
 	const relayed = JSON.stringify(SessionManager.open(writePromotedSession({ cwd: dir, sessionDir: dir, name: "disk-cleanup", branch: [], history, relay: true })).buildSessionContext());
 	expect(relayed).toContain("now continues in its own Pi window, aside:disk-cleanup");
 	expect(relayed).toContain("use tell_agent");
-	expect(relayed).not.toContain("Moving to its own window.");
+	expect(relayed).toContain("Moving it.");
+	expect(relayed).not.toContain("move: disk-cleanup");
+	expect(relayed).toContain('"name":"tell_agent","arguments":{"message":"Keep the routing tests."}');
+	expect(relayed).toContain("Delivered to the parent agent.");
+	expect(relayed).not.toContain("tell: Keep");
 	const copied = JSON.stringify(SessionManager.open(writePromotedSession({ cwd: dir, sessionDir: dir, name: "disk-cleanup", branch: [], history })).buildSessionContext());
 	expect(copied).not.toContain("tell_agent");
+	expect(copied).toContain("[Delivered to the main agent: Keep the routing tests.]");
 });
 
 test("tmux promotion targets the originating pane, inserts and selects a uniquely named window, safely quotes env", () => {
@@ -133,5 +153,6 @@ test("an exported snapshot completes pending main tool calls with still-running 
 	const result = context.find(message => message.role === "toolResult");
 	expect(result?.role === "toolResult" && result.toolCallId).toBe("pending");
 	expect(JSON.stringify(result)).toContain("still running in the main session");
-	expect(context.at(-1)?.role).toBe("user");
+	expect(context.at(-2)?.role).toBe("user");
+	expect(context.at(-1)).toMatchObject({ role: "custom", customType: "aside-moved" });
 });

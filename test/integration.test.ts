@@ -348,7 +348,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		} finally { rmSync(inbox, { recursive: true, force: true }); }
 	}, 20_000);
 
-	test("models without native tool additions conservatively rebuild instead of claiming a cache-preserving fork", async () => {
+	test("models without native tool additions still fork on the main cache: the aside declares no tools", async () => {
 		server = await startCaptureServer();
 		pi = await startPi({ baseUrl: server.url, model: "claude-legacy", extensions: [ASIDE, PROBE] });
 		server.enqueue({ text: "Main ready." });
@@ -357,9 +357,12 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		await pi.prompt("/aside explain");
 		const done = await asideDone(pi);
 		expect(done.error).toBeUndefined();
-		expect(done.tier).toBe("rebuilt");
-		expect(done.reason).toContain("tools");
-		expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("tell_agent");
+		expect(done.tier).not.toBe("rebuilt");
+		expect(String(done.reason ?? "")).not.toContain("tools");
+		const side = server.requests.at(-1)!.body as { tools?: unknown };
+		const main = server.requests.at(-2)!.body as { tools?: unknown };
+		expect(JSON.stringify(side.tools)).toBe(JSON.stringify(main.tools));
+		expect(JSON.stringify(side)).not.toContain("tool_addition");
 	}, 20_000);
 
 	test("a move request waits for the current aside tool to finish and retains its result", async () => {
@@ -369,7 +372,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		await pi.prompt("start"); await pi.waitForAgentEnd();
 		server.enqueue(
 			{ text: "route: side\n", toolCalls: [{ name: "bash", arguments: { command: "echo started > progress; sleep 0.5; echo finished > progress" } }, { name: "bash", arguments: { command: "echo should-not-run > after-move" } }] },
-			{ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "disk-cleanup" } }] },
+			{ text: "route: side\nMoving it.\nmove: disk-cleanup" },
 		);
 		await pi.prompt("/aside do an independent task");
 		await pi.waitFor(() => existsSync(join(pi!.cwd, "progress")) ? true : undefined);
@@ -388,7 +391,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE, PROBE], args: ["--tools", ""] });
 		let side = 0;
 		server.respond(request => JSON.stringify(request.body).includes("<aside>")
-			? ++side === 1 ? { text: "route: side\n", toolCalls: [{ name: "tell_agent", arguments: { message: "The user asks you to retain all tests; we found they cover routing." } }] } : { text: "Delivered." }
+			? ++side === 1 ? { text: "route: side\nPassed on.\ntell: The user asks you to retain all tests; we found they cover routing." } : { text: "Delivered." }
 			: { text: "I will retain the tests." });
 		await pi.prompt("/aside tell the agent what we found");
 		expect((await asideDone(pi)).error).toBeUndefined();
@@ -441,7 +444,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE], env: { TMUX: "/tmp/fake,1,0", TMUX_PANE: "%1", PATH: `${bin}:${process.env.PATH}` } });
 		const root = join(pi.agentDir, "aside-inbox");
 		expect(existsSync(root)).toBe(false);
-		server.enqueue({ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "disk-cleanup" } }] });
+		server.enqueue({ text: "route: side\nmove: disk-cleanup" });
 		await pi.prompt("/aside move this out");
 		server.enqueue({ text: "Received the child's findings." });
 		await pi.waitFor(() => existsSync(root) && readdirSync(root).length ? true : undefined);
@@ -459,7 +462,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		expect(readdirSync(inbox)).toEqual([]);
 		// Finished work moves without a prompt; a move that cut tool calls short goes on with "continue".
 		expect(readFileSync(join(bin, "tmux.log"), "utf8")).not.toContain(" continue");
-		server.enqueue({ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "second-task" } }, { name: "read", arguments: { path: "a.txt" } }] });
+		server.enqueue({ text: "route: side\nmove: second-task", toolCalls: [{ name: "read", arguments: { path: "a.txt" } }] });
 		await pi.prompt("/aside move this out now");
 		await pi.waitFor(() => readFileSync(join(bin, "tmux.log"), "utf8").includes("second-task") || undefined);
 		expect(readFileSync(join(bin, "tmux.log"), "utf8").trim().split("\n").at(-1)).toEndWith(" continue");
@@ -468,7 +471,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 	test("non-tmux move_out creates a resumable named session and shows its launch command", async () => {
 		server = await startCaptureServer();
 		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE, PROBE], env: { TMUX: "", TMUX_PANE: "" } });
-		server.enqueue({ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "disk-cleanup", hint: "Tell the agent when done" } }] });
+		server.enqueue({ text: "route: side\nMoving it.\nmove: disk-cleanup | Tell the agent when done" });
 		await pi.prompt("/aside move this to its own window");
 		const done = await asideDone(pi);
 		expect(done.error).toBeUndefined();

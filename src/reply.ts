@@ -1,7 +1,9 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
 // Parsing of the aside model's reply (docs/ux.md §3.3, §3.4): a hidden first line `route: side|agent`, the
-// visible body, and an optional last line `next: <one line for the agent>`.
+// visible body, and optional hidden last lines: `next: <what the user would say next>`, `tell: <message for the main
+// agent>` and `move: <name> | <hint>`. Actions are text, not tools: declaring tools in the fork would change the
+// request's tool list on providers without inline tool additions, and the main session's cache would not apply.
 
 export type Route = "side" | "agent";
 
@@ -9,10 +11,15 @@ export interface ParsedReply {
 	route: Route | undefined;
 	body: string;
 	next: string | undefined;
+	/** A complete reply's `tell:` line: relay this to the main agent. */
+	tell?: string;
+	/** A complete reply's `move:` line: move this aside to its own window. */
+	move?: { name?: string; hint?: string };
 }
 
 const ROUTE_LINE = /^route\s*:\s*(side|agent)$/i;
-const NEXT_LINE = /^\s*next\s*:(.*)$/i;
+const ACTION_LINE = /^\s*[*`]*(next|tell|move)[*`]*\s*:(.*)$/i;
+const ACTION_FORMS = ["next:", "tell:", "move:"];
 const ROUTE_FORMS = ["route: side", "route: agent", "route : side", "route : agent", "route:side", "route:agent"];
 
 function cleanLine(line: string): string {
@@ -59,22 +66,31 @@ export function parseReply(raw: string, done: boolean): ParsedReply {
 
 	const lines = rest.split("\n");
 	while (lines.length > 0 && lines.at(-1)!.trim() === "") lines.pop();
-	let next: string | undefined;
-	const last = lines.at(-1);
-	if (last !== undefined) {
-		const match = NEXT_LINE.exec(last);
-		if (done) {
-			if (match) {
-				lines.pop();
-				const value = match[1]!.trim();
-				next = sanitizeSuggestion(value);
-			}
-		} else {
-			const trimmed = last.trim().toLowerCase();
-			if (match || (trimmed !== "" && "next:".startsWith(trimmed))) lines.pop();
+	const parsed: ParsedReply = { route, body: "", next: undefined };
+	// While streaming, the last line may still become an action line: keep it hidden until it is clearly prose.
+	if (!done && lines.length > 0) {
+		const trimmed = lines.at(-1)!.trim().toLowerCase();
+		if (trimmed !== "" && ACTION_FORMS.some(form => form.startsWith(trimmed))) lines.pop();
+	}
+	for (;;) {
+		while (lines.length > 0 && lines.at(-1)!.trim() === "") lines.pop();
+		const match = lines.length > 0 ? ACTION_LINE.exec(lines.at(-1)!) : null;
+		if (!match) break;
+		lines.pop();
+		if (!done) continue;
+		const value = match[2]!.replace(/^[*`\s]+|[*`\s]+$/g, "");
+		const kind = match[1]!.toLowerCase();
+		if (kind === "next") parsed.next ??= sanitizeSuggestion(value);
+		else if (kind === "tell") { if (value && parsed.tell === undefined) parsed.tell = value; }
+		else if (parsed.move === undefined) {
+			const bar = value.indexOf("|");
+			const name = (bar < 0 ? value : value.slice(0, bar)).trim();
+			const hint = bar < 0 ? "" : value.slice(bar + 1).trim();
+			parsed.move = { ...(name ? { name } : {}), ...(hint ? { hint } : {}) };
 		}
 	}
-	return { route, body: lines.join("\n").trim(), next };
+	parsed.body = lines.join("\n").trim();
+	return parsed;
 }
 
 /** A suggestion is one sentence in the user's words, never another command. */

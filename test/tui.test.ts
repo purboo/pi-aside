@@ -49,7 +49,7 @@ describe("TUI", () => {
 		await tui.waitForScreen(/sleep 2/);
 		let side = 0;
 		server.respond(request => JSON.stringify(request.body).includes("<aside>")
-			? ++side === 1 ? { text: "route: side\n", toolCalls: [{ name: "tell_agent", arguments: { message: "After this step, retain the routing tests." } }] } : { text: "Queued." }
+			? ++side === 1 ? { text: "route: side\nPassed on.\ntell: After this step, retain the routing tests." } : { text: "Queued." }
 			: { text: "Read the relay after completing the main step." });
 		tui.type("/aside tell the agent to retain the routing tests"); tui.key("Enter");
 		await tui.waitForScreen(/It will see this after its current step\./);
@@ -64,7 +64,7 @@ describe("TUI", () => {
 		const { server, tui } = await start();
 		let side = 0;
 		server.respond(request => JSON.stringify(request.body).includes("<aside>")
-			? ++side === 1 ? { text: "route: side\n", toolCalls: [{ name: "tell_agent", arguments: { message: "Keep the routing tests." } }] } : { text: "Delivered." }
+			? ++side === 1 ? { text: "route: side\nPassed on.\ntell: Keep the routing tests." } : { text: "Delivered." }
 			: { text: "I will keep the tests." });
 		tui.type("/aside tell the agent to keep the routing tests"); tui.key("Enter");
 		const screen = await tui.waitForScreen(/It has read this\./);
