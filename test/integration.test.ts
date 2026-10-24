@@ -339,12 +339,27 @@ describe("0.5.0 relays, continuation and promotion", () => {
 				{ toolCalls: [{ name: "tell_agent", arguments: { message: "The user asks me to report that disk cleanup is complete." } }] },
 				{ text: "Sent to the parent." },
 			);
+			// The parent Pi is listening (this test process stands in for it).
+			writeFileSync(join(inbox, "owner"), String(process.pid));
 			await pi.prompt("Tell the main agent that cleanup is complete.");
 			await pi.waitForAgentEnd();
-			const files = readdirSync(inbox);
+			const files = readdirSync(inbox).filter(name => name.endsWith(".json"));
 			expect(files).toHaveLength(1);
 			expect(JSON.parse(readFileSync(join(inbox, files[0]!), "utf8"))).toEqual({ name: "disk-cleanup", message: "The user asks me to report that disk cleanup is complete." });
 			expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("Delivered to the parent inbox.");
+			// The parent Pi exited: the message is kept, and the window must not claim delivery.
+			rmSync(join(inbox, "owner"));
+			server.enqueue(
+				{ toolCalls: [{ name: "tell_agent", arguments: { message: "Second note." } }] },
+				{ text: "Queued." },
+			);
+			await pi.prompt("Tell it one more thing.");
+			await pi.waitFor(() => server!.requests.length >= 4 && readdirSync(inbox).filter(name => name.endsWith(".json")).length === 2 ? true : undefined);
+			await pi.waitForAgentEnd();
+			expect(readdirSync(inbox).filter(name => name.endsWith(".json"))).toHaveLength(2);
+			const last = JSON.stringify(server.requests.at(-1)!.body);
+			expect(last).toContain("Queued, not delivered yet");
+			expect(last).toContain("pi --session ");
 		} finally { rmSync(inbox, { recursive: true, force: true }); }
 	}, 20_000);
 
@@ -459,7 +474,9 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		const relay = entries.find(entry => entry.customType === "aside")!;
 		expect((relay.details as { name: string }).name).toBe("aside:disk-cleanup");
 		expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("9 GB recovered");
-		expect(readdirSync(inbox)).toEqual([]);
+		expect(readdirSync(inbox).filter(name => name.endsWith(".json"))).toEqual([]);
+		// A live Pi marks the inbox it reads, so windows can tell "delivered" from "queued".
+		expect(readFileSync(join(inbox, "owner"), "utf8")).toMatch(/^\d+$/);
 		// Finished work moves without a prompt; a move that cut tool calls short goes on with "continue".
 		expect(readFileSync(join(bin, "tmux.log"), "utf8")).not.toContain(" continue");
 		server.enqueue({ text: "route: side\nmove: second-task", toolCalls: [{ name: "read", arguments: { path: "a.txt" } }] });

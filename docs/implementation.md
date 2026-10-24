@@ -222,9 +222,14 @@ Outside tmux the exported thread retires and the panel keeps the launch command.
 if it fails, the UI shows the command without the inaccurate `Copied:` claim. This is the closest permitted fallback.
 A failed tmux launch leaves the panel/thread available and the valid exported session on disk.
 
-The parent's inbox lives under `getAgentDir()/aside-inbox/<session-id>-<pid>`. `fs.watch` plus a startup scan reads
+The parent's inbox lives under `getAgentDir()/aside-inbox/<session-id>` (0.5.2; it was `<session-id>-<pid>`, so a
+restarted parent listened elsewhere and relays sent meanwhile were silently lost). `fs.watch` plus a startup scan reads
 atomic JSON writes; only successfully delivered files are removed, so delivery errors can retry. Invalid shapes are
-removed and reported. Watchers close on session replacement/shutdown. A child with `PI_ASIDE_PARENT` registers a
+removed and reported. Watchers close on session replacement/shutdown. A listening Pi writes its pid to `owner` and
+removes it on close: the child's `tell_agent` reports "Delivered" only while that pid is alive, and otherwise
+"Queued" with `pi --session <id>`. The latest live Pi on a session owns the inbox, so two never deliver one
+message twice. On start the parent also drains and watches pre-0.5.2 `<session-id>-<pid>` inboxes of its session,
+which windows opened by older versions still write to. A child with `PI_ASIDE_PARENT` registers a
 normal main-agent `tell_agent` tool writing into that inbox. Its new model/tool usage belongs to its independent Pi.
 
 ### 2.13 Panel touch boundary and bottom line (0.5.0)
