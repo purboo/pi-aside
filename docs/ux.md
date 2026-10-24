@@ -283,12 +283,14 @@ English words in kebab case and one placeholder sentence in the conversation lan
 request. Invalid or missing values become `aside-N` and `tell the agent when you're done`.
 
 - Finish the current tool, then stop the thread. Show `moving to its own window…` during the move.
-- Write a normal Pi session in this cwd's normal session directory. Preserve the main branch at the initial aside
+- Write a normal Pi session next to the main session (its session directory). Preserve the main branch at the initial aside
   fork, then every aside question, answer, tool call and result as ordinary messages. Strip route/next protocol.
   Set the session name to `aside:<name>`, discoverable with `pi -r`.
 - With `$TMUX` and `$TMUX_PANE`, insert a new window immediately after the originating pane's window, use the same
   cwd, and select it. Resolve duplicate window names with `-2`, `-3`, etc. The window and session share the name.
-  Start `pi --session <file>` and continue work interrupted by promotion. Do not kill running tools.
+  Start `pi --session <file>`. Only when the move skipped tool calls of the same answer does the new window go on
+  by itself (an initial `continue`); finished work just waits for the user. Do not kill running tools. The moved
+  transcript replaces the `move_out` result with a plain statement that the move happened and where it is now.
 - Without tmux, copy `pi --session <file>` and show `Copied: pi --session … — paste it in any terminal.`
   If clipboard copying fails, show the command without claiming it was copied. The exported thread is retired;
   the next aside is fresh.

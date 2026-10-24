@@ -24,13 +24,13 @@ export function uniqueName(name: string, windows: readonly string[]): string {
 
 export function shellQuote(text: string): string { return `'${text.replace(/'/g, "'\\''")}'`; }
 
-export function tmuxCommand(options: { pane: string; cwd: string; file: string; name: string; hint: string; inbox: string; continue: boolean }): string[] {
+export function tmuxCommand(options: { window: string; cwd: string; file: string; name: string; hint: string; inbox: string; continue: boolean }): string[] {
 	const command = `env PI_ASIDE_PARENT=${shellQuote(options.inbox)} PI_ASIDE_NAME=${shellQuote(options.name)} PI_ASIDE_HINT=${shellQuote(options.hint)} pi --session ${shellQuote(options.file)}${options.continue ? " continue" : ""}`;
-	return ["new-window", "-a", "-t", options.pane, "-n", `aside:${options.name}`, "-c", options.cwd, "-P", "-F", "#{window_id}\t#{window_index}", command];
+	return ["new-window", "-a", "-t", options.window, "-n", `aside:${options.name}`, "-c", options.cwd, "-P", "-F", "#{window_id}\t#{window_index}", command];
 }
 
 /** Preserve the exact fork branch (including compactions/edits), then append ordinary aside messages. */
-export function writePromotedSession(options: { cwd: string; branch: Any[]; history: Any[]; name: string; sessionDir?: string; parentFile?: string }): string {
+export function writePromotedSession(options: { cwd: string; branch: Any[]; history: Any[]; name: string; sessionDir?: string; parentFile?: string; relay?: boolean }): string {
 	const session = SessionManager.create(options.cwd, options.sessionDir, { parentSession: options.parentFile });
 	const file = session.getSessionFile()!;
 	mkdirSync(session.getSessionDir(), { recursive: true });
@@ -47,6 +47,10 @@ export function writePromotedSession(options: { cwd: string; branch: Any[]; hist
 				const text = parseReply(part.text, true).body;
 				return text ? [{ ...part, text }] : [];
 			});
+		}
+		// The new window has no move_out tool: say plainly that the move happened, and where the conversation is now.
+		if (message.role === "toolResult" && message.toolName === "move_out" && !message.isError) {
+			message.content = [{ type: "text", text: `Moved: this conversation now continues in its own Pi window, aside:${options.name}. You are in that window, and move_out is no longer needed.${options.relay ? " To reach the original agent, use tell_agent when the user asks." : ""}` }];
 		}
 		child.appendMessage(message);
 	}

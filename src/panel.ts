@@ -180,7 +180,7 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 		if (turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
 	} else {
 		if (turn.aborted) tail.push(dim("stopped"));
-		if (turn.error) tail.push(theme.fg("error", `aside failed: ${turn.error}`));
+		if (turn.error) tail.push(theme.fg("error", truncateToWidth(`aside failed: ${turn.error.replace(/\s+/g, " ").trim()}`, width, "…")));
 	}
 
 	const room = Math.max(2, (state.maxLines ?? PANEL_LINES) - 2 - head.length - tail.length);

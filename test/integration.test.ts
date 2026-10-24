@@ -1,7 +1,7 @@
 // Offline integration: real Pi 1.3.0 in RPC mode, pi-aside loaded, a capture server for the provider.
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { postInbox } from "../src/promotion.ts";
@@ -377,8 +377,8 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		expect((await asideDone(pi)).error).toBeUndefined();
 		expect(readFileSync(join(pi.cwd, "progress"), "utf8").trim()).toBe("finished");
 		expect(existsSync(join(pi.cwd, "after-move"))).toBe(false);
-		const sessionRoot = join(pi.agentDir, "sessions");
-		const file = readdirSync(sessionRoot, { recursive: true }).find(file => String(file).endsWith(".jsonl"))!;
+		const sessionRoot = pi.sessionDir; // promoted next to the main session
+		const file = readdirSync(sessionRoot, { recursive: true }).find(file => String(file).endsWith(".jsonl") && readFileSync(join(sessionRoot, String(file)), "utf8").includes('"name":"aside:'))!;
 		const child = SessionManager.open(join(sessionRoot, String(file)));
 		expect(JSON.stringify(child.buildSessionContext())).toContain("finished");
 	}, 20_000);
@@ -428,17 +428,41 @@ describe("0.5.0 relays, continuation and promotion", () => {
 
 	test("cross-process inbox delivery uses the promoted window name and removes the file", async () => {
 		server = await startCaptureServer();
-		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE] });
-		server.enqueue({ text: "Received the child's findings." });
+		// A stand-in tmux: the inbox exists only once a move-out opened a window.
+		const bin = mkdtempSync(join(tmpdir(), "pi-aside-tmux-"));
+		// Like real tmux, new-window refuses a pane target ("can't specify pane here").
+		writeFileSync(join(bin, "tmux"), [
+			"#!/bin/sh",
+			"case \"$1\" in",
+			"  display-message) echo @1 ;;",
+			"  new-window) [ \"$4\" = @1 ] || { echo \"can't specify pane here\" >&2; exit 1; }; printf '%s\\n' \"$*\" >> \"$0.log\"; printf '@9\\t3\\n' ;;",
+			"esac",
+		].join("\n"), { mode: 0o755 });
+		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE], env: { TMUX: "/tmp/fake,1,0", TMUX_PANE: "%1", PATH: `${bin}:${process.env.PATH}` } });
 		const root = join(pi.agentDir, "aside-inbox");
+		expect(existsSync(root)).toBe(false);
+		server.enqueue({ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "disk-cleanup" } }] });
+		await pi.prompt("/aside move this out");
+		server.enqueue({ text: "Received the child's findings." });
 		await pi.waitFor(() => existsSync(root) && readdirSync(root).length ? true : undefined);
 		const inbox = join(root, readdirSync(root)[0]!);
 		postInbox(inbox, { name: "disk-cleanup", message: "Disk cleanup finished; 9 GB recovered." });
 		await pi.waitForAgentEnd();
-		const relay = pi.sessionEntries().find(entry => entry.customType === "aside")!;
+		// The session directory now also holds the promoted session: search every file.
+		const dir = pi!.sessionDir;
+		const entries = readdirSync(dir, { recursive: true }).filter(file => String(file).endsWith(".jsonl"))
+			.flatMap(file => readFileSync(join(dir, String(file)), "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line)));
+		expect(entries.find(entry => entry.customType === "aside-window")?.data).toMatchObject({ name: "disk-cleanup", index: "3", target: "@9" });
+		const relay = entries.find(entry => entry.customType === "aside")!;
 		expect((relay.details as { name: string }).name).toBe("aside:disk-cleanup");
-		expect(JSON.stringify(server.requests[0]!.body)).toContain("9 GB recovered");
+		expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("9 GB recovered");
 		expect(readdirSync(inbox)).toEqual([]);
+		// Finished work moves without a prompt; a move that cut tool calls short goes on with "continue".
+		expect(readFileSync(join(bin, "tmux.log"), "utf8")).not.toContain(" continue");
+		server.enqueue({ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "second-task" } }, { name: "read", arguments: { path: "a.txt" } }] });
+		await pi.prompt("/aside move this out now");
+		await pi.waitFor(() => readFileSync(join(bin, "tmux.log"), "utf8").includes("second-task") || undefined);
+		expect(readFileSync(join(bin, "tmux.log"), "utf8").trim().split("\n").at(-1)).toEndWith(" continue");
 	}, 20_000);
 
 	test("non-tmux move_out creates a resumable named session and shows its launch command", async () => {
@@ -450,8 +474,8 @@ describe("0.5.0 relays, continuation and promotion", () => {
 		expect(done.error).toBeUndefined();
 		expect(done.answer).toContain("pi --session");
 		expect(done.answer).toContain("paste it in any terminal");
-		const sessionRoot = join(pi.agentDir, "sessions");
-		const files = readdirSync(sessionRoot, { recursive: true }).filter(file => String(file).endsWith(".jsonl"));
+		const sessionRoot = pi.sessionDir; // promoted next to the main session
+		const files = readdirSync(sessionRoot, { recursive: true }).filter(file => String(file).endsWith(".jsonl") && readFileSync(join(sessionRoot, String(file)), "utf8").includes('"name":"aside:'));
 		expect(files).toHaveLength(1);
 		const child = SessionManager.open(join(sessionRoot, String(files[0])));
 		expect(child.getSessionName()).toBe("aside:disk-cleanup");

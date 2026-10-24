@@ -12,8 +12,14 @@
   adjacent tmux window, or copy/show a resume command. Promoted windows can relay findings to the parent inbox.
 - Expand the panel's close target to two rows and restrict reader clicks to the visible count text.
 - Completed panels have no cost footer. Usage accounting and the reader's details remain available.
-- Pi 1.3.0 uses a dim line flush with the editor for suggestions to preserve custom editor extensions.
-  Models without native tool additions use the existing conservative rebuilt path.
+- Pi has no editor placeholder API, so suggestions are a dim line flush with the editor; custom editor
+  extensions keep working. Models without native tool additions use the existing conservative rebuilt path.
+- A moved-out window goes on by itself only when the move cut tool calls short. Its transcript says plainly
+  that the move happened, so its model does not disown the `move_out` call.
+- Fixed for Pi 1.4.0: `/reload` no longer crashes Pi through a timer that touched the old extension context.
+- In a session where the agent has not replied yet, aside tools say so plainly instead of Pi's internal
+  "No assistant message issued this call".
+- The aside's own tools are declared once per fork, so later questions do not invalidate the provider cache.
 
 ## 0.4.1
 

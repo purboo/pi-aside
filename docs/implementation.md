@@ -1,6 +1,6 @@
 # pi-aside: implementation notes
 
-Status: implemented against Pi 1.3.0. This document maps the code to [design.md](design.md) (engine, rev 11) and
+Status: implemented against Pi 1.4.0. This document maps the code to [design.md](design.md) (engine, rev 11) and
 [ux.md](ux.md) (interaction, rev 9), lists where the implementation departs from them and why, and records how it was
 verified.
 
@@ -57,7 +57,7 @@ Esc leaves an autocomplete list or an unrelated focused dialog alone.
 
 ### 2.3 The empty-editor placeholder uses a flush dim line (0.5.0)
 
-Pi 1.3.0 has no placeholder API. `getEditorComponent()` returns a configured factory, not the live editor.
+Pi 1.4.0 has no placeholder API. `getEditorComponent()` returns a configured factory, not the live editor.
 `setEditorComponent()` rebuilds the editor. Wrapping the current factory can preserve it initially but cannot
 compose with another extension that replaces it later; mutating its rendered lines would also assume its cursor,
 frame and autocomplete layout. The permitted fallback is one dim `belowEditor` line: `/aside <next-step>`.
@@ -160,7 +160,9 @@ bridge scope remains bounded even when Pi's nested recorder reaches its call lim
 
 ### 2.10 Relays and consumption (0.5.0)
 
-`src/thread.ts` adds `tell_agent` and `move_out` as appended `SystemMessage.toolsAdded` definitions. They are
+`src/thread.ts` adds `tell_agent` and `move_out` as one appended `SystemMessage.toolsAdded` definition per fork
+(declaring a name again counts as a redefinition for addition-only transports and would refold the tool list,
+losing the cache). They are
 handled before the session executor, including in blank sessions and when the main has no tools. The notice
 restricts them to an explicit latest user request and requires self-contained relay text. There is no separate
 language-specific intent heuristic. The route-before-tool guard still covers both internal tools.
@@ -173,7 +175,7 @@ comprehension or completion. The shared relay object updates the panel's `→ to
 status sentence. The message renderer displays `aside ›` or `aside:<name> ›`; content labels it as an instruction
 relayed from the user's aside. The handoff parser, accepted handoff and side-note-on-send path are removed.
 
-### 2.11 Native tool declarations and cache checks (Pi 1.3.0 limitation)
+### 2.11 Native tool declarations and cache checks (Pi limitation)
 
 The new tools must always be available to the aside and absent from the main agent's loadout. Their definitions
 therefore follow the frozen main prefix. Pi's provider adapters can preserve that prefix only when the model's
@@ -202,8 +204,11 @@ placeholder results as the fork, keeping the exported context valid. Names use `
 round-trip and list tests verify resumability and discovery in the normal cwd session directory.
 
 An incoming follow-up waits for the current aside tool to finish, skips remaining calls and yields before another request; it never aborts that tool to move.
-`move_out` runs in sequence after earlier tools and stops further calls before exporting. Its unfinished model
-turn is resumed with `continue` in the child. tmux arguments target `$TMUX_PANE`, use `new-window -a` without `-d`,
+`move_out` runs in sequence after earlier tools and stops further calls before exporting. Only when that skipped
+later calls of the same answer is the child started with `continue`; a real tmux trial showed that a `continue`
+after finished work made the child's model disown the move. tmux has no pane targets for `new-window`
+("can't specify pane here"): `display-message -t $TMUX_PANE '#{window_id}'` finds the window, and
+`new-window -a -t <window>` without `-d`,
 quote child environment/command arguments, and return the stable window ID and displayed index. Names are checked
 in that tmux session and suffixed on collision. The parent appends a custom **entry**, via `appendEntry` and
 `registerEntryRenderer`, rather than a custom message: Pi explicitly excludes custom entries from LLM context
@@ -232,7 +237,7 @@ No cost line is appended to the completed panel. The reader retains accounting d
 
 Final 0.5.0 check: TypeScript passed; **169 tests passed, 0 failed, 731 assertions**, across 7 files in 51.51 s.
 
-A local capture server speaks the three APIs as pi-ai consumes them. Real Pi 1.3.0 runs over RPC and, for the
+A local capture server speaks the three APIs as pi-ai consumes them. Real Pi 1.4.0 runs over RPC and, for the
 interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 
 | Area | Tests |
