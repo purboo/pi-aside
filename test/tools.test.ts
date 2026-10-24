@@ -79,11 +79,11 @@ describe("session tool executor", () => {
 		expect(existsSync(join(p.cwd, "bridge-off.txt"))).toBe(false);
 	}, 20_000);
 
-	test("before a main assistant exists, Pi rejects nested execution", async () => {
+	test("before a main assistant exists, Pi rejects nested execution and the aside says why", async () => {
 		const p = await boot(undefined, false);
 		const result = await call("write", { path: "early.txt", content: "no" });
 		expect(result.isError).toBe(true);
-		expect(text(result)).toContain("No assistant message");
+		expect(text(result)).toContain("once the agent has replied");
 		expect(existsSync(join(p.cwd, "early.txt"))).toBe(false);
 	}, 20_000);
 

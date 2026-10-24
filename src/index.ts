@@ -29,6 +29,7 @@ import { installToolExecutor, projectAsideTools } from "./tools.ts";
 import { installFinalPayloadTap } from "./tap.ts";
 import { currentSettings } from "./transport.ts";
 import { UsageQueue } from "./usage.ts";
+import { existsSync } from "node:fs";
 import { Inbox, inboxPath, postInbox, promotionOptions, shellQuote, tmuxCommand, uniqueName, writePromotedSession } from "./promotion.ts";
 
 // biome-ignore lint: Pi's event and UI types are used structurally where they are not exported.
@@ -166,11 +167,11 @@ export default function piAside(pi: ExtensionAPI): void {
 		u ? { input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0 } : undefined;
 	pi.on("message_update", (event) => {
 		const message = event.message as Any;
-		if (message.role === "assistant") { observer.assistantUpdate(usageOf(message.usage)); suggestion = undefined; refreshBelow(); }
+		if (message.role === "assistant") observer.assistantUpdate(usageOf(message.usage));
 	});
 	pi.on("message_end", (event) => {
 		const message = event.message as Any;
-		if (message.role === "assistant") { observer.assistantEnd(usageOf(message.usage), message.stopReason); suggestion = undefined; refreshBelow(); }
+		if (message.role === "assistant") observer.assistantEnd(usageOf(message.usage), message.stopReason);
 		return undefined;
 	});
 	pi.on("agent_start", () => refreshBelow());
@@ -215,7 +216,8 @@ export default function piAside(pi: ExtensionAPI): void {
 		resetSession(ctx);
 		installFinalPayloadTap(ctx.modelRegistry, (payload) => observer.finalPayload(payload));
 		installTui(ctx);
-		ensureInbox();
+		// Watch only after a move-out made the inbox; a reload keeps listening for windows opened before it.
+		if (existsSync(inboxPath(ctx.sessionManager.getSessionId()))) ensureInbox();
 		refreshBelow();
 	});
 	pi.on("session_before_switch", () => {
@@ -232,6 +234,10 @@ export default function piAside(pi: ExtensionAPI): void {
 		unsubscribeInput = undefined;
 		background.dispose();
 		inbox?.close(); inbox = undefined;
+		// Pi 1.4 throws on any use of a ctx after reload or session replacement; pending timers must not reach it.
+		ctxRef = undefined;
+		if (ticker) clearInterval(ticker);
+		ticker = undefined;
 	});
 	pi.on("session_compact", (_event, ctx) => {
 		ctxRef = ctx;
@@ -261,6 +267,10 @@ export default function piAside(pi: ExtensionAPI): void {
 	pi.on("input", (event, ctx) => {
 		ctxRef = ctx;
 		if (event.source !== "interactive") return { action: "continue" };
+		// Anything the user sends retires the placeholders, even when typing and Enter arrived in one chunk.
+		childHint = undefined;
+		suggestion = undefined;
+		refreshBelow();
 		if (event.images && event.images.length > 0) return continueToAgent(event.text);
 		const key = event.streamingBehavior === "followUp" ? "followUp" : "submit";
 		if (routeEnter({ text: event.text, busy: busy(), key }) === "side") {
@@ -326,13 +336,18 @@ export default function piAside(pi: ExtensionAPI): void {
 		const ctx = ctxRef!;
 		const options = promotionOptions(args, ++promoted);
 		const tmux = !!process.env.TMUX && !!process.env.TMUX_PANE;
+		// new-window takes a window, not a pane: the new window goes right after the one Pi runs in.
+		let window = "";
 		if (tmux) {
-			const windows = await pi.exec("tmux", ["list-windows", "-t", process.env.TMUX_PANE!, "-F", "#{window_name}"]);
-			if (windows.code !== 0) throw new Error(windows.stderr || "Could not list tmux windows");
+			const here = await pi.exec("tmux", ["display-message", "-p", "-t", process.env.TMUX_PANE!, "#{window_id}"]);
+			if (here.code !== 0) throw new Error(here.stderr.trim() || "Could not find the tmux window");
+			window = here.stdout.trim();
+			const windows = await pi.exec("tmux", ["list-windows", "-t", window, "-F", "#{window_name}"]);
+			if (windows.code !== 0) throw new Error(windows.stderr.trim() || "Could not list tmux windows");
 			signal.throwIfAborted();
 			options.name = uniqueName(options.name, windows.stdout.trim().split("\n"));
 		}
-		const file = writePromotedSession({ cwd: ctx.cwd, branch: current.baseBranch, history: current.history, name: options.name, parentFile: ctx.sessionManager.getSessionFile() });
+		const file = writePromotedSession({ cwd: ctx.cwd, branch: current.baseBranch, history: current.history, name: options.name, sessionDir: ctx.sessionManager.getSessionDir(), parentFile: ctx.sessionManager.getSessionFile(), relay: tmux });
 		if (!tmux) {
 			current.retired = true;
 			const command = `pi --session ${shellQuote(file)}`;
@@ -341,9 +356,9 @@ export default function piAside(pi: ExtensionAPI): void {
 			return;
 		}
 		signal.throwIfAborted();
-		const result = await pi.exec("tmux", tmuxCommand({ pane: process.env.TMUX_PANE!, cwd: ctx.cwd, file, ...options, inbox: ensureInbox(), continue: true }));
+		const result = await pi.exec("tmux", tmuxCommand({ window, cwd: ctx.cwd, file, ...options, inbox: ensureInbox(), continue: current.unfinished }));
 		signal.throwIfAborted();
-		if (result.code !== 0) throw new Error(result.stderr || "Could not open tmux window");
+		if (result.code !== 0) throw new Error(result.stderr.trim() || "Could not open tmux window");
 		const [target, index] = result.stdout.trim().split("\t");
 		pi.appendEntry("aside-window", { name: options.name, index, target });
 		askSeq++;

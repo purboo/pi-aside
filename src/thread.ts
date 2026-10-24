@@ -31,7 +31,7 @@ export function notice(options: { routeCheck: boolean }): string {
 	}
 	lines.push(
 		"Call tell_agent({message}) ONLY when the user's latest message explicitly asks you to tell/pass/relay something to the main agent, in any language. Never on your own initiative. The message must be self-contained: the main agent never saw this aside conversation. You can reach the agent with this tool; never claim you cannot. Its result tells you whether delivery is queued or read, so a brief confirmation is enough.",
-		"Call move_out({name, hint}) ONLY on an explicit request to move this aside to its own window. Choose 2–3 lowercase English words in kebab case for name and one placeholder sentence in the conversation language for hint (for example: tell the agent when you're done). Do not make a separate naming request.",
+		"Call move_out({name, hint}) ONLY on an explicit request to move this aside to its own window. Choose 2–3 lowercase English words in kebab case for name. For hint, write one short placeholder sentence in the same language as the user's messages here, such as \"tell the agent when you're done\" for English. Do not make a separate naming request.",
 		"You may end with one hidden last line `next: <what the user would say next>` only when there is an obvious next step; usually omit it. One short sentence, in the user's words and conversation language. Never add the /aside prefix. You may suggest telling the agent, but do not send without an explicit request.",
 		"After a round-limit tool result, summarize done ✓ and left …, then stop with a next: line suggesting continuation. If much work remains, suggest moving this to its own window instead.",
 		"</aside>",
@@ -171,6 +171,8 @@ export class AsideThread {
 	baseBranch: Any[] = [];
 	private promotion: { name?: string; hint?: string } | undefined;
 	retired = false;
+	/** Whether a move-out skipped tool calls of the current answer: the new window then goes on with that work. */
+	unfinished = false;
 	private idleWaiters: Array<() => void> = [];
 	private pauseRequested = false;
 	waitForIdle(): Promise<void> {
@@ -228,6 +230,7 @@ export class AsideThread {
 	async ask(question: string, options: { routeCheck: boolean; onRoute?: (route: "side" | "agent") => void }): Promise<TurnView> {
 		this.controller?.abort();
 		this.pauseRequested = false;
+		this.unfinished = false;
 		const turn: TurnView = { question, raw: "", done: false, steps: [], startedAt: Date.now(), cost: 0, read: 0, written: 0 };
 		this.turns.push(turn);
 		const controller = new AbortController();
@@ -275,7 +278,8 @@ export class AsideThread {
 				content: [{ type: "text", text: `${notice(options)}\n\n${prefix}${question}` }],
 				timestamp: Date.now(),
 			};
-			const added: unknown[] = [{ role: "system", content: "", toolsAdded: INTERNAL_TOOLS, timestamp: Date.now() }, q];
+			// The aside's own tools are added once per fork, after the shared prefix, so the main session's cache still applies.
+			const added: unknown[] = this.exchange.length === 0 ? [{ role: "system", content: "", toolsAdded: INTERNAL_TOOLS, timestamp: Date.now() }, q] : [q];
 			this.history.push({ role: "user", content: question, timestamp: Date.now() });
 			let summary = false;
 			let textBefore = "";
@@ -387,7 +391,10 @@ export class AsideThread {
 		try {
 			signal.throwIfAborted();
 			if (this.pauseRequested) return toolResult(call, "Not run: the user asked a follow-up. Resume if still needed.", true);
-			if (this.promotion) return toolResult(call, "Not run: continuing in the new window.", true);
+			if (this.promotion) {
+				this.unfinished = true;
+				return toolResult(call, "Not run: continuing in the new window.", true);
+			}
 			if (call.name === "tell_agent") {
 				const message = call.arguments?.message;
 				if (typeof message !== "string" || !message.trim()) return toolResult(call, "message must be a non-empty string", true);

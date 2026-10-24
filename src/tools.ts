@@ -124,7 +124,13 @@ export function installToolExecutor(pi: ExtensionAPI): ToolExecutor {
 			if (!result.details || typeof result.details.isError !== "boolean" || !result.details.result) {
 				throw new Error("Pi's aside executor returned an unsupported result");
 			}
-			return result.details as AgentToolCallOutcome;
+			const outcome = result.details as AgentToolCallOutcome;
+			// Pi runs a nested call against the main session's last assistant message; a session without one has none.
+			const text = outcome.isError ? (outcome.result?.content ?? []).map((part) => ("text" in part ? part.text : "")).join("") : "";
+			if (text === "No assistant message issued this call") {
+				return failure(name, args, "Tools work in an aside once the agent has replied at least once in this session. Tell the user so; do not retry.");
+			}
+			return outcome;
 		} catch (error) {
 			return failure(name, args, error instanceof Error ? error.message : String(error));
 		} finally {

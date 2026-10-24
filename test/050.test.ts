@@ -77,11 +77,24 @@ test("promotion writes a normal session, preserving the fork branch and tools, s
 	expect(JSON.stringify(child.buildSessionContext())).toBe(context);
 });
 
+test("the new window's transcript says the move happened, so its model does not disown move_out", () => {
+	const dir = temp();
+	const call = { type: "toolCall", id: "m", name: "move_out", arguments: { name: "disk-cleanup" } };
+	const assistant = { role: "assistant", content: [{ type: "text", text: "route: side\n" }, call], timestamp: 2, api: "anthropic-messages", provider: "test", model: "test", stopReason: "toolUse", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } };
+	const history = [{ role: "user", content: "move this out", timestamp: 1 }, assistant, { role: "toolResult", toolCallId: "m", toolName: "move_out", content: [{ type: "text", text: "Moving to its own window." }], isError: false, timestamp: 3 }];
+	const relayed = JSON.stringify(SessionManager.open(writePromotedSession({ cwd: dir, sessionDir: dir, name: "disk-cleanup", branch: [], history, relay: true })).buildSessionContext());
+	expect(relayed).toContain("now continues in its own Pi window, aside:disk-cleanup");
+	expect(relayed).toContain("use tell_agent");
+	expect(relayed).not.toContain("Moving to its own window.");
+	const copied = JSON.stringify(SessionManager.open(writePromotedSession({ cwd: dir, sessionDir: dir, name: "disk-cleanup", branch: [], history })).buildSessionContext());
+	expect(copied).not.toContain("tell_agent");
+});
+
 test("tmux promotion targets the originating pane, inserts and selects a uniquely named window, safely quotes env", () => {
 	const name = uniqueName("disk-cleanup", ["aside:disk-cleanup", "aside:disk-cleanup-2"]);
 	expect(name).toBe("disk-cleanup-3");
-	const args = tmuxCommand({ pane: "%12", cwd: "/a b", file: "/a b/session.jsonl", name, hint: "you're done; $(no)", inbox: "/inbox", continue: true });
-	expect(args.slice(0, 9)).toEqual(["new-window", "-a", "-t", "%12", "-n", "aside:disk-cleanup-3", "-c", "/a b", "-P"]);
+	const args = tmuxCommand({ window: "@12", cwd: "/a b", file: "/a b/session.jsonl", name, hint: "you're done; $(no)", inbox: "/inbox", continue: true });
+	expect(args.slice(0, 9)).toEqual(["new-window", "-a", "-t", "@12", "-n", "aside:disk-cleanup-3", "-c", "/a b", "-P"]);
 	expect(args).not.toContain("-d");
 	expect(args.at(-1)).toContain("PI_ASIDE_HINT='you'\\''re done; $(no)'");
 	expect(args.at(-1)).toContain("pi --session '/a b/session.jsonl' continue");
