@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2
+
+- Fixed: after the main Pi restarted, messages from a moved-out window were reported as delivered but never
+  arrived. The inbox now belongs to the session, not the process: resuming the session (`pi --session <id>`)
+  delivers everything sent meanwhile, including from windows opened by older versions.
+- A moved-out window says a message is queued, not delivered, while no Pi is running the original session, and
+  names the command that resumes it.
+
 ## 0.5.1
 
 - Fixed: on models without inline tool additions (such as Anthropic-compatible providers with

@@ -30,7 +30,7 @@ import { installFinalPayloadTap } from "./tap.ts";
 import { currentSettings } from "./transport.ts";
 import { UsageQueue } from "./usage.ts";
 import { existsSync } from "node:fs";
-import { Inbox, inboxPath, postInbox, promotionOptions, shellQuote, tmuxCommand, uniqueName, writePromotedSession } from "./promotion.ts";
+import { Inbox, inboxOnline, inboxPath, inboxSession, legacyInboxPaths, postInbox, promotionOptions, shellQuote, tmuxCommand, uniqueName, writePromotedSession } from "./promotion.ts";
 
 // biome-ignore lint: Pi's event and UI types are used structurally where they are not exported.
 type Any = any;
@@ -83,7 +83,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	let belowShown = false;
 	let suggestion: string | undefined;
 	let childHint = process.env.PI_ASIDE_PARENT ? process.env.PI_ASIDE_HINT : undefined;
-	let inbox: Inbox | undefined;
+	let inboxes: Inbox[] = [];
 	let promoted = 0;
 	const relays = new Map<string, Relay>();
 	let rebuiltInARow = 0;
@@ -184,7 +184,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	// ---------------------------------------------------------------- sessions
 
 	function resetSession(ctx: ExtensionContext | undefined): void {
-		inbox?.close(); inbox = undefined; relays.clear();
+		closeInboxes(); relays.clear();
 		askSeq++;
 		closedAt = 0;
 		thread?.abort();
@@ -216,8 +216,10 @@ export default function piAside(pi: ExtensionAPI): void {
 		resetSession(ctx);
 		installFinalPayloadTap(ctx.modelRegistry, (payload) => observer.finalPayload(payload));
 		installTui(ctx);
-		// Watch only after a move-out made the inbox; a reload keeps listening for windows opened before it.
-		if (existsSync(inboxPath(ctx.sessionManager.getSessionId()))) ensureInbox();
+		// Watch only after a move-out made the inbox. A reload or a restart that resumes the session keeps
+		// listening for windows opened before it, and first delivers what they sent while it was away.
+		const id = ctx.sessionManager.getSessionId();
+		if (existsSync(inboxPath(id)) || legacyInboxPaths(id).length > 0) ensureInbox();
 		refreshBelow();
 	});
 	pi.on("session_before_switch", () => {
@@ -233,7 +235,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
 		background.dispose();
-		inbox?.close(); inbox = undefined;
+		closeInboxes();
 		// Pi 1.4 throws on any use of a ctx after reload or session replacement; pending timers must not reach it.
 		ctxRef = undefined;
 		if (ticker) clearInterval(ticker);
@@ -317,18 +319,32 @@ export default function piAside(pi: ExtensionAPI): void {
 		parameters: { type: "object", properties: { message: { type: "string" } }, required: ["message"], additionalProperties: false },
 		async execute(_id, args) {
 			if (typeof args.message !== "string" || !args.message.trim()) throw new Error("message must be a non-empty string");
-			postInbox(process.env.PI_ASIDE_PARENT!, { name: process.env.PI_ASIDE_NAME ?? "aside", message: args.message.trim() });
-			return { content: [{ type: "text", text: "Delivered to the parent inbox." }], details: {} };
+			const dir = process.env.PI_ASIDE_PARENT!;
+			postInbox(dir, { name: process.env.PI_ASIDE_NAME ?? "aside", message: args.message.trim() });
+			// Say "delivered" only when a Pi is listening; otherwise the message waits for the session to be resumed.
+			const text = inboxOnline(dir)
+				? "Delivered to the parent inbox."
+				// `pi -c` would reopen this window's own, newer session, so name the original one.
+				: `Queued, not delivered yet: no Pi is running the original agent's session now. It will receive this as soon as that session is resumed: \`pi --session ${inboxSession(dir)}\` (not \`pi -c\`, which reopens this window's session). Tell the user exactly this.`;
+			return { content: [{ type: "text", text }], details: {} };
 		},
 	});
 
 	function ensureInbox(): string {
-		const dir = inboxPath(ctxRef!.sessionManager.getSessionId());
-		if (!inbox) {
-			inbox = new Inbox(dir, value => deliver(value.message, `aside:${value.name}`), error => ctxRef?.ui.notify(`aside: ${String(error)}`, "error"));
-			inbox.start();
+		const id = ctxRef!.sessionManager.getSessionId();
+		const dir = inboxPath(id);
+		if (inboxes.length === 0) {
+			for (const path of [dir, ...legacyInboxPaths(id)]) {
+				const inbox = new Inbox(path, value => deliver(value.message, `aside:${value.name}`), error => ctxRef?.ui.notify(`aside: ${String(error)}`, "error"));
+				inbox.start();
+				inboxes.push(inbox);
+			}
 		}
 		return dir;
+	}
+	function closeInboxes(): void {
+		for (const inbox of inboxes) inbox.close();
+		inboxes = [];
 	}
 
 	async function moveOut(current: AsideThread, args: { name?: string; hint?: string }, signal: AbortSignal): Promise<void> {

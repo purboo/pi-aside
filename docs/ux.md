@@ -302,7 +302,10 @@ request. Invalid or missing values become `aside-N` and `tell the agent when you
   Its empty-editor placeholder has no `/aside` prefix and disappears when the user types. It registers its own
   main-agent `tell_agent` tool, restricted by its description to explicit user requests. Atomic JSON inbox files
   carry self-contained relays back to the parent. The parent scans on start, watches changes, and removes consumed
-  files. Cross-process read status is not shown. The child is a normal independent Pi; its new usage is its own.
+  files. Cross-process read status is not shown, but the child never claims a delivery nobody can receive: when
+  no Pi is running the parent session, its tool result says the message is queued and names the command that
+  resumes that session (`pi --session <id>`, not `pi -c`, which reopens the child's newer session). A resumed or
+  restarted parent delivers queued relays first. The child is a normal independent Pi; its new usage is its own.
 
 
 ## 4. Feasibility (Pi 1.3.0)

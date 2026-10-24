@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { parseReply, sanitizeSuggestion } from "../src/reply.ts";
 import { panelHit, panelView, renderBelow } from "../src/panel.ts";
-import { Inbox, postInbox, promotionOptions, tmuxCommand, uniqueName, writePromotedSession } from "../src/promotion.ts";
+import { Inbox, inboxOnline, inboxPath, inboxSession, legacyInboxPaths, postInbox, promotionOptions, tmuxCommand, uniqueName, writePromotedSession } from "../src/promotion.ts";
 import { notice } from "../src/thread.ts";
 
 const dirs: string[] = [];
@@ -155,4 +155,59 @@ test("an exported snapshot completes pending main tool calls with still-running 
 	expect(JSON.stringify(result)).toContain("still running in the main session");
 	expect(context.at(-2)?.role).toBe("user");
 	expect(context.at(-1)).toMatchObject({ role: "custom", customType: "aside-moved" });
+});
+
+test("a restarted Pi resuming the session reads what its windows sent while it was down, and windows learn whether anyone listens", () => {
+	const dir = temp();
+	const received: string[] = [];
+	const first = new Inbox(dir, value => received.push(value.message), () => { });
+	first.start();
+	expect(inboxOnline(dir)).toBe(true);
+	first.close();
+	// Pi is down: the window's message waits, and the window can say so honestly.
+	expect(inboxOnline(dir)).toBe(false);
+	postInbox(dir, { name: "notes", message: "sent while down" });
+	expect(received).toEqual([]);
+	const second = new Inbox(dir, value => received.push(value.message), () => { });
+	try {
+		second.start();
+		expect(received).toEqual(["sent while down"]);
+		expect(inboxOnline(dir)).toBe(true);
+	} finally { second.close(); }
+});
+
+test("a second live Pi on the same session takes the inbox, so no message is delivered twice", () => {
+	const dir = temp();
+	const a: string[] = [], b: string[] = [];
+	const older = new Inbox(dir, value => a.push(value.message), () => { });
+	older.start();
+	// Another live process claims it (the test runner's parent stands in for the newer Pi).
+	writeFileSync(join(dir, "owner"), String(process.ppid));
+	postInbox(dir, { name: "notes", message: "one" });
+	older.scan();
+	expect(a).toEqual([]);
+	expect(existsSync(dir) && readdirSync(dir).filter(name => name.endsWith(".json")).length).toBe(1);
+	older.close();
+	// Closing does not drop the other process's claim.
+	expect(readFileSync(join(dir, "owner"), "utf8")).toBe(String(process.ppid));
+	const newer = new Inbox(dir, value => b.push(value.message), () => { });
+	try { newer.start(); expect(b).toEqual(["one"]); } finally { newer.close(); }
+});
+
+test("inboxes are per session, and pre-0.5.2 per-process inboxes of the session are found", () => {
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	const agent = temp();
+	process.env.PI_CODING_AGENT_DIR = agent;
+	try {
+		expect(inboxPath("abc")).toBe(join(agent, "aside-inbox", "abc"));
+		expect(inboxPath("abc")).toBe(inboxPath("abc"));
+		for (const name of ["abc-1234", "abc-99", "abc-x1", "abcd-12", "abc"]) mkdirSync(join(agent, "aside-inbox", name), { recursive: true });
+		expect(legacyInboxPaths("abc").sort()).toEqual([join(agent, "aside-inbox", "abc-1234"), join(agent, "aside-inbox", "abc-99")]);
+		expect(legacyInboxPaths("none")).toEqual([]);
+		const id = "019a1b2c-3d4e-7f00-8123-456789abcdef";
+		expect(inboxSession(join(agent, "aside-inbox", id))).toBe(id);
+		expect(inboxSession(join(agent, "aside-inbox", `${id}-4242`))).toBe(id);
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
+	}
 });

@@ -1,7 +1,7 @@
 // Session promotion and the small file inbox shared with independent Pi windows.
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { withPlaceholders } from "./fork.ts";
 import { parseReply, sanitizeSuggestion } from "./reply.ts";
@@ -66,8 +66,36 @@ export function writePromotedSession(options: { cwd: string; branch: Any[]; hist
 }
 
 export interface InboxMessage { message: string; name: string }
-export function inboxPath(sessionId: string, pid = process.pid): string {
-	return join(getAgentDir(), "aside-inbox", `${sessionId.replace(/[^a-zA-Z0-9_-]/g, "_")}-${pid}`);
+// One inbox per session, not per process: a restarted Pi that resumes the session reads what its windows sent meanwhile.
+export function inboxPath(sessionId: string): string {
+	return join(getAgentDir(), "aside-inbox", safeId(sessionId));
+}
+function safeId(sessionId: string): string { return sessionId.replace(/[^a-zA-Z0-9_-]/g, "_"); }
+/** Inboxes of this session made by Pi 0.5.1 and earlier, named `<id>-<pid>`; windows opened then still write there. */
+export function legacyInboxPaths(sessionId: string): string[] {
+	const root = join(getAgentDir(), "aside-inbox");
+	const prefix = `${safeId(sessionId)}-`;
+	try {
+		return readdirSync(root).filter(name => name.startsWith(prefix) && /^\d+$/.test(name.slice(prefix.length))).map(name => join(root, name));
+	} catch { return []; }
+}
+const OWNER = "owner";
+function alive(pid: number): boolean {
+	if (!Number.isInteger(pid) || pid <= 0) return false;
+	try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+function ownerOf(dir: string): number | undefined {
+	try { return Number(readFileSync(join(dir, OWNER), "utf8").trim()) || undefined; } catch { return undefined; }
+}
+/** The parent session id an inbox belongs to (pre-0.5.2 names carry a `-<pid>` suffix). */
+export function inboxSession(dir: string): string {
+	const name = basename(dir);
+	return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i.exec(name)?.[0] ?? name;
+}
+/** Whether a running Pi is listening on this inbox right now. */
+export function inboxOnline(dir: string): boolean {
+	const pid = ownerOf(dir);
+	return pid !== undefined && alive(pid);
 }
 export function postInbox(dir: string, value: InboxMessage): void {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -82,12 +110,22 @@ export class Inbox {
 	constructor(readonly dir: string, private readonly deliver: (value: InboxMessage) => void, private readonly onError: (error: unknown) => void) { }
 	start(): void {
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+		// The latest Pi on the session takes the inbox; a second live Pi stops reading so nothing is delivered twice.
+		writeFileSync(join(this.dir, OWNER), String(process.pid), { mode: 0o600 });
 		this.watcher = watch(this.dir, () => this.scan());
 		this.watcher.on("error", this.onError);
 		this.watcher.unref();
 		this.scan();
 	}
+	private owns(): boolean {
+		const pid = ownerOf(this.dir);
+		if (pid === process.pid) return true;
+		if (pid !== undefined && alive(pid)) return false;
+		try { writeFileSync(join(this.dir, OWNER), String(process.pid), { mode: 0o600 }); } catch { return false; }
+		return true;
+	}
 	scan(): void {
+		if (!this.watcher || !this.owns()) return;
 		for (const name of readdirSync(this.dir).filter(name => name.endsWith(".json")).sort()) {
 			const file = join(this.dir, name);
 			try {
@@ -100,5 +138,9 @@ export class Inbox {
 			} catch (error) { this.onError(error); }
 		}
 	}
-	close(): void { this.watcher?.close(); this.watcher = undefined; }
+	close(): void {
+		this.watcher?.close(); this.watcher = undefined;
+		// Going offline: windows report "queued" instead of "delivered" until a Pi resumes the session.
+		if (ownerOf(this.dir) === process.pid) try { unlinkSync(join(this.dir, OWNER)); } catch { /* already gone */ }
+	}
 }
