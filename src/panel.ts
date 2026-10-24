@@ -1,4 +1,4 @@
-// What the user sees (docs/ux.md §3.2–§3.5): the answer panel above the editor, the hint and the handoff ghost
+// What the user sees (docs/ux.md §3.2–§3.5): the answer panel above the editor, the hint and the next-step placeholder
 // text below it, and the `/aside` reader overlay. None of them takes the keyboard focus except the reader, which is
 // an explicit modal. The panel works like a small window on top of the conversation: Esc or its "✕" closes it, and
 // the wheel (a swipe on a touch screen) over it scrolls it.
@@ -140,6 +140,7 @@ export interface PanelView {
 	more?: MoreAction;
 	/** Lines (indexes into `lines`) that open the reader when clicked or tapped: the "more lines" counts. */
 	readerRows?: number[];
+	readerZones?: Array<{ row: number; from: number; to: number }>;
 	/** The long answer's scroll position and its largest value; undefined when it fits. */
 	scroll?: { top: number; max: number };
 }
@@ -169,15 +170,19 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 	if (previous) head.push(truncateToWidth(dim(`after: ${previous.question.replace(/\s+/g, " ")}`), width, "…"));
 	const tail: string[] = [];
 	const parsed = parseReply(turn.raw, turn.done);
-	const body = [...stepLines(turn, width, theme), ...(parsed.body ? md(parsed.body, width) : [])];
+	const relays = (turn.relays ?? []).flatMap(relay => [
+		theme.fg("accent", "→ to the agent"),
+		...plainText(relay.message, Math.max(1, width - 2)).map(line => `${theme.fg("accent", "┃")} ${line}`),
+		dim(relay.read ? "It has read this." : "It will see this after its current step."),
+	]);
+	const body = [...stepLines(turn, width, theme), ...relays, ...(parsed.body ? md(parsed.body, width) : [])];
 	if (!turn.done) {
 		if (turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
 	} else {
 		if (turn.aborted) tail.push(dim("stopped"));
 		if (turn.error) tail.push(theme.fg("error", `aside failed: ${turn.error}`));
 	}
-	const money = moneyLine(turn);
-	if (money) tail.push(dim(money));
+
 	const room = Math.max(2, (state.maxLines ?? PANEL_LINES) - 2 - head.length - tail.length);
 	if (body.length <= room) return { lines: [...head, ...body, ...tail] };
 	// Scrolled to the end, the view has the "above" line and room - 1 lines of the answer.
@@ -245,16 +250,16 @@ export function panelView(state: PanelState, width: number, theme: Theme, md: Ma
 		out.push(`${border("│")} ${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))} ${border("│")}`);
 	}
 	out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
-	return { lines: out, more: body.more, readerRows: body.readerRows?.map((row) => row + 1), scroll: body.scroll };
+	return { lines: out, more: body.more, readerRows: body.readerRows?.map((row) => row + 1), readerZones: body.readerRows?.map(row => ({ row: row + 1, from: 2, to: Math.min(width - 3, 1 + visibleWidth(body.lines[row]!)) })), scroll: body.scroll };
 }
 
 /** What Enter would do with the editor's text: nothing new, ask on the side, or follow up on the open panel's thread. */
 export type HintKind = "ask" | "follow" | undefined;
 
-/** Below the editor: the hint before an Enter that asks on the side, or the handoff ghost text. */
-export function renderBelow(input: { hint: HintKind | boolean; ghost: string | undefined }, width: number, theme: Theme): string[] {
+/** Below the editor: the hint before an Enter that asks on the side, or the next-step placeholder. */
+export function renderBelow(input: { hint: HintKind | boolean; next: string | undefined }, width: number, theme: Theme): string[] {
 	const lines: string[] = [];
-	if (input.ghost) lines.push(truncateToWidth(theme.fg("dim", `⇥ ${input.ghost}  (tab accepts)`), width));
+	if (input.next) lines.push(truncateToWidth(theme.fg("dim", `/aside ${input.next}`), width));
 	if (input.hint) lines.push(truncateToWidth(theme.fg("dim", input.hint === "follow" ? FOLLOW_HINT : HINT), width));
 	return lines;
 }
@@ -297,7 +302,7 @@ export class Reader {
 		private readonly type?: (text: string) => void,
 		/** Whether Pi reports the mouse for this reader. */
 		private readonly mouse: () => boolean = () => false,
-	) {}
+	) { }
 
 	/** Where the latest question starts: the reader opens there, like a conversation opens at its end. */
 	private latestStart = 0;
@@ -385,7 +390,7 @@ export class Reader {
 		return undefined;
 	}
 
-	invalidate(): void {}
+	invalidate(): void { }
 }
 
 /** Pi's "more" key (`app.tools.expand`); false where Pi's keybindings are not loaded. */
@@ -395,4 +400,12 @@ function isMoreKey(data: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+/** Only the count's visible text opens the reader; close wins on both top rows. */
+export function panelHit(view: PanelView, width: number, x: number, y: number, mouse: boolean): "close" | "reader" | undefined {
+	const [from, to] = closeZone(width);
+	if (mouse && y >= 0 && y <= 1 && x >= from && x <= to) return "close";
+	if (view.readerZones?.some(zone => y === zone.row && x >= zone.from && x <= zone.to)) return "reader";
+	return undefined;
 }

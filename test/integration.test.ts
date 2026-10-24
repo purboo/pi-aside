@@ -1,6 +1,10 @@
 // Offline integration: real Pi 1.3.0 in RPC mode, pi-aside loaded, a capture server for the provider.
 
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync, readdirSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { tmpdir } from "node:os";
+import { postInbox } from "../src/promotion.ts";
 import { join, resolve } from "node:path";
 import { extendsList, splitList, strip } from "../src/payload.ts";
 import { type CaptureServer, startCaptureServer } from "./harness/capture.ts";
@@ -322,4 +326,136 @@ describe("handlers and fallbacks", () => {
 		expect(body).toContain("Earlier in this side conversation");
 		expectExtends("anthropic", req5.body, server.requests[3]!.body);
 	}, 60_000);
+});
+
+
+describe("0.5.0 relays, continuation and promotion", () => {
+	test("a promoted Pi's normal main-agent tell_agent tool writes to its parent inbox", async () => {
+		const inbox = mkdtempSync(join(tmpdir(), "aside-child-inbox-"));
+		try {
+			server = await startCaptureServer();
+			pi = await startPi({ baseUrl: server.url, extensions: [ASIDE], env: { PI_ASIDE_PARENT: inbox, PI_ASIDE_NAME: "disk-cleanup", PI_ASIDE_HINT: "Tell the agent when done" } });
+			server.enqueue(
+				{ toolCalls: [{ name: "tell_agent", arguments: { message: "The user asks me to report that disk cleanup is complete." } }] },
+				{ text: "Sent to the parent." },
+			);
+			await pi.prompt("Tell the main agent that cleanup is complete.");
+			await pi.waitForAgentEnd();
+			const files = readdirSync(inbox);
+			expect(files).toHaveLength(1);
+			expect(JSON.parse(readFileSync(join(inbox, files[0]!), "utf8"))).toEqual({ name: "disk-cleanup", message: "The user asks me to report that disk cleanup is complete." });
+			expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("Delivered to the parent inbox.");
+		} finally { rmSync(inbox, { recursive: true, force: true }); }
+	}, 20_000);
+
+	test("models without native tool additions conservatively rebuild instead of claiming a cache-preserving fork", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, model: "claude-legacy", extensions: [ASIDE, PROBE] });
+		server.enqueue({ text: "Main ready." });
+		await pi.prompt("start"); await pi.waitForAgentEnd();
+		server.enqueue({ text: "route: side\nAnswer." });
+		await pi.prompt("/aside explain");
+		const done = await asideDone(pi);
+		expect(done.error).toBeUndefined();
+		expect(done.tier).toBe("rebuilt");
+		expect(done.reason).toContain("tools");
+		expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("tell_agent");
+	}, 20_000);
+
+	test("a move request waits for the current aside tool to finish and retains its result", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE, PROBE], env: { TMUX: "", TMUX_PANE: "" } });
+		server.enqueue({ text: "Main ready." });
+		await pi.prompt("start"); await pi.waitForAgentEnd();
+		server.enqueue(
+			{ text: "route: side\n", toolCalls: [{ name: "bash", arguments: { command: "echo started > progress; sleep 0.5; echo finished > progress" } }, { name: "bash", arguments: { command: "echo should-not-run > after-move" } }] },
+			{ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "disk-cleanup" } }] },
+		);
+		await pi.prompt("/aside do an independent task");
+		await pi.waitFor(() => existsSync(join(pi!.cwd, "progress")) ? true : undefined);
+		await pi.prompt("/aside move this to its own window");
+		expect((await asideDone(pi)).error).toBeUndefined();
+		expect(readFileSync(join(pi.cwd, "progress"), "utf8").trim()).toBe("finished");
+		expect(existsSync(join(pi.cwd, "after-move"))).toBe(false);
+		const sessionRoot = join(pi.agentDir, "sessions");
+		const file = readdirSync(sessionRoot, { recursive: true }).find(file => String(file).endsWith(".jsonl"))!;
+		const child = SessionManager.open(join(sessionRoot, String(file)));
+		expect(JSON.stringify(child.buildSessionContext())).toContain("finished");
+	}, 20_000);
+
+	test("tell_agent is available with no main tools and delivers a user-side instruction without a bridge", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE, PROBE], args: ["--tools", ""] });
+		let side = 0;
+		server.respond(request => JSON.stringify(request.body).includes("<aside>")
+			? ++side === 1 ? { text: "route: side\n", toolCalls: [{ name: "tell_agent", arguments: { message: "The user asks you to retain all tests; we found they cover routing." } }] } : { text: "Delivered." }
+			: { text: "I will retain the tests." });
+		await pi.prompt("/aside tell the agent what we found");
+		expect((await asideDone(pi)).error).toBeUndefined();
+		await pi.waitForAgentEnd();
+		const entries = pi.sessionEntries().filter(entry => entry.type === "custom_message");
+		expect(entries).toHaveLength(1);
+		expect(entries[0]!.customType).toBe("aside");
+		expect(entries[0]!.display).toBe(true);
+		expect(entries[0]!.content).toContain("Relayed from the user's aside conversation");
+		expect(JSON.stringify(entries)).toContain("retain all tests");
+		expect(JSON.stringify(server.requests.find(request => !JSON.stringify(request.body).includes("<aside>"))!.body)).toContain("retain all tests");
+		expect(pi.events.filter(event => event.type === "tool_execution_start")).toHaveLength(0);
+	}, 20_000);
+
+	test("24th tool response is refused, one summary request follows, and continue gets fresh rounds", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE, PROBE] });
+		server.enqueue({ text: "Main ready." });
+		await pi.prompt("start"); await pi.waitForAgentEnd();
+		let rounds = 0;
+		server.respond(() => {
+			rounds++;
+			if (rounds <= 24) return { text: "route: side\n", toolCalls: [{ name: rounds === 24 ? "write" : "read", arguments: rounds === 24 ? { path: "must-not-run.txt", content: "no" } : { path: "missing.txt" } }] };
+			return { text: rounds === 25 ? "✓ Checked what was possible.\n… More remains." : "Continued." };
+		});
+		await pi.prompt("/aside inspect repeatedly");
+		const done = await asideDone(pi);
+		expect(done.error).toBeUndefined();
+		expect(rounds).toBe(25);
+		expect(existsSync(join(pi.cwd, "must-not-run.txt"))).toBe(false);
+		expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("Not run: round limit reached. Summarize what is done and what is left, then stop.");
+		expect(done.answer).toContain("More remains.");
+		await pi.prompt("/aside continue");
+		expect((await asideDone(pi, 1)).answer).toContain("Continued.");
+		expect(rounds).toBe(26);
+	}, 25_000);
+
+	test("cross-process inbox delivery uses the promoted window name and removes the file", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE] });
+		server.enqueue({ text: "Received the child's findings." });
+		const root = join(pi.agentDir, "aside-inbox");
+		await pi.waitFor(() => existsSync(root) && readdirSync(root).length ? true : undefined);
+		const inbox = join(root, readdirSync(root)[0]!);
+		postInbox(inbox, { name: "disk-cleanup", message: "Disk cleanup finished; 9 GB recovered." });
+		await pi.waitForAgentEnd();
+		const relay = pi.sessionEntries().find(entry => entry.customType === "aside")!;
+		expect((relay.details as { name: string }).name).toBe("aside:disk-cleanup");
+		expect(JSON.stringify(server.requests[0]!.body)).toContain("9 GB recovered");
+		expect(readdirSync(inbox)).toEqual([]);
+	}, 20_000);
+
+	test("non-tmux move_out creates a resumable named session and shows its launch command", async () => {
+		server = await startCaptureServer();
+		pi = await startPi({ baseUrl: server.url, extensions: [ASIDE, PROBE], env: { TMUX: "", TMUX_PANE: "" } });
+		server.enqueue({ text: "route: side\n", toolCalls: [{ name: "move_out", arguments: { name: "disk-cleanup", hint: "Tell the agent when done" } }] });
+		await pi.prompt("/aside move this to its own window");
+		const done = await asideDone(pi);
+		expect(done.error).toBeUndefined();
+		expect(done.answer).toContain("pi --session");
+		expect(done.answer).toContain("paste it in any terminal");
+		const sessionRoot = join(pi.agentDir, "sessions");
+		const files = readdirSync(sessionRoot, { recursive: true }).filter(file => String(file).endsWith(".jsonl"));
+		expect(files).toHaveLength(1);
+		const child = SessionManager.open(join(sessionRoot, String(files[0])));
+		expect(child.getSessionName()).toBe("aside:disk-cleanup");
+		expect(JSON.stringify(child.buildSessionContext())).toContain("move this to its own window");
+		expect(readFileSync(child.getSessionFile()!, "utf8")).not.toContain("<aside>");
+	}, 20_000);
 });

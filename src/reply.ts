@@ -1,16 +1,18 @@
+import { truncateToWidth } from "@earendil-works/pi-tui";
+
 // Parsing of the aside model's reply (docs/ux.md §3.3, §3.4): a hidden first line `route: side|agent`, the
-// visible body, and an optional last line `handoff: <one line for the agent>`.
+// visible body, and an optional last line `next: <one line for the agent>`.
 
 export type Route = "side" | "agent";
 
 export interface ParsedReply {
 	route: Route | undefined;
 	body: string;
-	handoff: string | undefined;
+	next: string | undefined;
 }
 
 const ROUTE_LINE = /^route\s*:\s*(side|agent)$/i;
-const HANDOFF_LINE = /^\s*handoff\s*:(.*)$/i;
+const NEXT_LINE = /^\s*next\s*:(.*)$/i;
 const ROUTE_FORMS = ["route: side", "route: agent", "route : side", "route : agent", "route:side", "route:agent"];
 
 function cleanLine(line: string): string {
@@ -41,7 +43,7 @@ export function parseReply(raw: string, done: boolean): ParsedReply {
 	let route: Route;
 	let rest: string;
 	if (newline < 0 && !done) {
-		if (couldBecomeRoute(first)) return { route: undefined, body: "", handoff: undefined };
+		if (couldBecomeRoute(first)) return { route: undefined, body: "", next: undefined };
 		route = "side";
 		rest = text;
 	} else {
@@ -57,20 +59,27 @@ export function parseReply(raw: string, done: boolean): ParsedReply {
 
 	const lines = rest.split("\n");
 	while (lines.length > 0 && lines.at(-1)!.trim() === "") lines.pop();
-	let handoff: string | undefined;
+	let next: string | undefined;
 	const last = lines.at(-1);
 	if (last !== undefined) {
-		const match = HANDOFF_LINE.exec(last);
+		const match = NEXT_LINE.exec(last);
 		if (done) {
 			if (match) {
 				lines.pop();
 				const value = match[1]!.trim();
-				handoff = value === "" || value.toLowerCase() === "none" ? undefined : value;
+				next = sanitizeSuggestion(value);
 			}
 		} else {
 			const trimmed = last.trim().toLowerCase();
-			if (match || (trimmed !== "" && "handoff:".startsWith(trimmed))) lines.pop();
+			if (match || (trimmed !== "" && "next:".startsWith(trimmed))) lines.pop();
 		}
 	}
-	return { route, body: lines.join("\n").trim(), handoff };
+	return { route, body: lines.join("\n").trim(), next };
+}
+
+/** A suggestion is one sentence in the user's words, never another command. */
+export function sanitizeSuggestion(value: string): string | undefined {
+	const line = value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").split(/[\r\n]/)[0]!.replace(/[\x00-\x1f\x7f]/g, "").trim();
+	if (!line || line.toLowerCase() === "none" || line.startsWith("/")) return undefined;
+	return truncateToWidth(line, 80, "…").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
 }

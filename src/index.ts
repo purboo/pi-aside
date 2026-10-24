@@ -1,13 +1,13 @@
 // pi-aside: ask a side question about a running Pi session without touching it, at the cache-read price.
 // Engine: docs/design.md. Interaction: docs/ux.md.
 
-import { type ExtensionAPI, type ExtensionContext, getMarkdownTheme, keyText } from "@earendil-works/pi-coding-agent";
+import { type ExtensionAPI, type ExtensionContext, copyToClipboard, getMarkdownTheme, keyText } from "@earendil-works/pi-coding-agent";
 import { getKeybindings, Markdown, matchesKey } from "@earendil-works/pi-tui";
 import { BackgroundWork } from "./busy.ts";
 import type { ForkEnv } from "./fork.ts";
 import { Observer, type Recipe } from "./observe.ts";
 import {
-	closeZone,
+	panelHit,
 	type HintKind,
 	type MarkdownRenderer,
 	MONEY_THRESHOLD,
@@ -24,11 +24,12 @@ import {
 } from "./panel.ts";
 import { endsWithQuestionMark, routeEnter } from "./qmark.ts";
 import { parseReply } from "./reply.ts";
-import { AsideThread, type TurnView } from "./thread.ts";
+import { AsideThread, type Relay, type TurnView } from "./thread.ts";
 import { installToolExecutor, projectAsideTools } from "./tools.ts";
 import { installFinalPayloadTap } from "./tap.ts";
 import { currentSettings } from "./transport.ts";
 import { UsageQueue } from "./usage.ts";
+import { Inbox, inboxPath, postInbox, promotionOptions, shellQuote, tmuxCommand, uniqueName, writePromotedSession } from "./promotion.ts";
 
 // biome-ignore lint: Pi's event and UI types are used structurally where they are not exported.
 type Any = any;
@@ -79,8 +80,11 @@ export default function piAside(pi: ExtensionAPI): void {
 	/** Invalidates callbacks and completions from a stopped or replaced aside. */
 	let askSeq = 0;
 	let belowShown = false;
-	let handoff: { text: string; note: string } | undefined;
-	let acceptedHandoff: { text: string; note: string } | undefined;
+	let suggestion: string | undefined;
+	let childHint = process.env.PI_ASIDE_PARENT ? process.env.PI_ASIDE_HINT : undefined;
+	let inbox: Inbox | undefined;
+	let promoted = 0;
+	const relays = new Map<string, Relay>();
 	let rebuiltInARow = 0;
 	let rebuiltNoticeShown = false;
 	let unsubscribeInput: (() => void) | undefined;
@@ -162,11 +166,11 @@ export default function piAside(pi: ExtensionAPI): void {
 		u ? { input: u.input ?? 0, output: u.output ?? 0, cacheRead: u.cacheRead ?? 0, cacheWrite: u.cacheWrite ?? 0 } : undefined;
 	pi.on("message_update", (event) => {
 		const message = event.message as Any;
-		if (message.role === "assistant") observer.assistantUpdate(usageOf(message.usage));
+		if (message.role === "assistant") { observer.assistantUpdate(usageOf(message.usage)); suggestion = undefined; refreshBelow(); }
 	});
 	pi.on("message_end", (event) => {
 		const message = event.message as Any;
-		if (message.role === "assistant") observer.assistantEnd(usageOf(message.usage), message.stopReason);
+		if (message.role === "assistant") { observer.assistantEnd(usageOf(message.usage), message.stopReason); suggestion = undefined; refreshBelow(); }
 		return undefined;
 	});
 	pi.on("agent_start", () => refreshBelow());
@@ -179,13 +183,13 @@ export default function piAside(pi: ExtensionAPI): void {
 	// ---------------------------------------------------------------- sessions
 
 	function resetSession(ctx: ExtensionContext | undefined): void {
+		inbox?.close(); inbox = undefined; relays.clear();
 		askSeq++;
 		closedAt = 0;
 		thread?.abort();
 		thread = undefined;
 		panel = { turns: [] };
-		handoff = undefined;
-		acceptedHandoff = undefined;
+		suggestion = undefined;
 		rebuiltInARow = 0;
 		observer.reset();
 		background.reset();
@@ -211,6 +215,8 @@ export default function piAside(pi: ExtensionAPI): void {
 		resetSession(ctx);
 		installFinalPayloadTap(ctx.modelRegistry, (payload) => observer.finalPayload(payload));
 		installTui(ctx);
+		ensureInbox();
+		refreshBelow();
 	});
 	pi.on("session_before_switch", () => {
 		beforeLeaving();
@@ -225,6 +231,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		unsubscribeInput?.();
 		unsubscribeInput = undefined;
 		background.dispose();
+		inbox?.close(); inbox = undefined;
 	});
 	pi.on("session_compact", (_event, ctx) => {
 		ctxRef = ctx;
@@ -263,26 +270,87 @@ export default function piAside(pi: ExtensionAPI): void {
 		return continueToAgent(event.text);
 	});
 
-	/**
-	 * The user is sending something to the agent: attach an accepted handoff's side note. The panel stays as it is: it
-	 * closes only when the user closes it (docs/ux.md §3.2).
-	 */
-	function continueToAgent(text: string): { action: "continue" } {
-		if (acceptedHandoff && text.trim().length > 0) {
-			const note = acceptedHandoff.note;
-			acceptedHandoff = undefined;
-			try {
-				pi.sendMessage(
-					{ customType: SIDE_NOTE_TYPE, content: note, display: true },
-					{ deliverAs: running() ? "steer" : "nextTurn" },
-				);
-			} catch {
-				// the handoff text still reaches the agent
-			}
-		}
-		handoff = undefined;
+	function continueToAgent(_text: string): { action: "continue" } {
+		suggestion = undefined;
 		refreshBelow();
 		return { action: "continue" };
+	}
+
+	function deliver(message: string, name = "aside"): Relay {
+		const relay: Relay = { id: crypto.randomUUID(), message, read: !running() };
+		relays.set(relay.id, relay);
+		pi.sendMessage({ customType: SIDE_NOTE_TYPE, content: `Relayed from the user's aside conversation (${name}):\n\n${message}`, display: true, details: { id: relay.id, name, message } }, { triggerTurn: true, deliverAs: "steer" });
+		return relay;
+	}
+
+	pi.on("message_start", event => {
+		const message = event.message as Any;
+		if (message.role === "custom" && message.customType === SIDE_NOTE_TYPE) {
+			const relay = relays.get(message.details?.id);
+			if (relay) { relay.read = true; relays.delete(relay.id); renderNow(); }
+		}
+	});
+	pi.registerMessageRenderer<{ name: string; message: string }>(SIDE_NOTE_TYPE, (message, _options, theme) => ({
+		render: width => plainText(`${message.details?.name ?? "aside"} › ${message.details?.message ?? message.content}`, width).map(line => theme.fg("accent", line)), invalidate() { },
+	}));
+	pi.registerEntryRenderer<{ name: string; index: string; target: string }>("aside-window", (entry, _options, theme) => ({
+		render: width => plainText(theme.fg("dim", `↗ aside:${entry.data?.name} · window ${entry.data?.index}`), width), invalidate() { },
+		handleMouse: event => {
+			if (event.button === "left" && event.type === "click" && entry.data?.target) {
+				void pi.exec("tmux", ["select-window", "-t", entry.data.target]); return { handled: true };
+			}
+			return undefined;
+		},
+	}));
+	if (process.env.PI_ASIDE_PARENT) pi.registerTool({
+		name: "tell_agent", label: "Tell the agent", description: "Relay a self-contained message to the parent agent ONLY when the user's latest message explicitly asks to tell/pass/relay something. Never send on your own initiative.",
+		parameters: { type: "object", properties: { message: { type: "string" } }, required: ["message"], additionalProperties: false },
+		async execute(_id, args) {
+			if (typeof args.message !== "string" || !args.message.trim()) throw new Error("message must be a non-empty string");
+			postInbox(process.env.PI_ASIDE_PARENT!, { name: process.env.PI_ASIDE_NAME ?? "aside", message: args.message.trim() });
+			return { content: [{ type: "text", text: "Delivered to the parent inbox." }], details: {} };
+		},
+	});
+
+	function ensureInbox(): string {
+		const dir = inboxPath(ctxRef!.sessionManager.getSessionId());
+		if (!inbox) {
+			inbox = new Inbox(dir, value => deliver(value.message, `aside:${value.name}`), error => ctxRef?.ui.notify(`aside: ${String(error)}`, "error"));
+			inbox.start();
+		}
+		return dir;
+	}
+
+	async function moveOut(current: AsideThread, args: { name?: string; hint?: string }, signal: AbortSignal): Promise<void> {
+		signal.throwIfAborted();
+		const ctx = ctxRef!;
+		const options = promotionOptions(args, ++promoted);
+		const tmux = !!process.env.TMUX && !!process.env.TMUX_PANE;
+		if (tmux) {
+			const windows = await pi.exec("tmux", ["list-windows", "-t", process.env.TMUX_PANE!, "-F", "#{window_name}"]);
+			if (windows.code !== 0) throw new Error(windows.stderr || "Could not list tmux windows");
+			signal.throwIfAborted();
+			options.name = uniqueName(options.name, windows.stdout.trim().split("\n"));
+		}
+		const file = writePromotedSession({ cwd: ctx.cwd, branch: current.baseBranch, history: current.history, name: options.name, parentFile: ctx.sessionManager.getSessionFile() });
+		if (!tmux) {
+			current.retired = true;
+			const command = `pi --session ${shellQuote(file)}`;
+			try { await copyToClipboard(command); current.current!.raw = `Copied: ${command} — paste it in any terminal.`; }
+			catch { current.current!.raw = `${command} — paste it in any terminal.`; }
+			return;
+		}
+		signal.throwIfAborted();
+		const result = await pi.exec("tmux", tmuxCommand({ pane: process.env.TMUX_PANE!, cwd: ctx.cwd, file, ...options, inbox: ensureInbox(), continue: true }));
+		signal.throwIfAborted();
+		if (result.code !== 0) throw new Error(result.stderr || "Could not open tmux window");
+		const [target, index] = result.stdout.trim().split("\t");
+		pi.appendEntry("aside-window", { name: options.name, index, target });
+		askSeq++;
+		suggestion = undefined;
+		thread = undefined;
+		panel = { turns: [], hidden: true };
+		showPanel(false); refreshBelow();
 	}
 
 	/** Send the user's original text with Pi's meaning: a steer while running, a prompt otherwise. */
@@ -305,6 +373,8 @@ export default function piAside(pi: ExtensionAPI): void {
 			cwd: () => ctxRef?.cwd ?? process.cwd(),
 			sessionId: () => ctxRef?.sessionManager.getSessionId() ?? "",
 			executeTool,
+			tellAgent: deliver,
+			moveOut,
 			onUpdate: () => renderNow(),
 		};
 	}
@@ -315,7 +385,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	 */
 	function continues(): boolean {
 		const ctx = ctxRef;
-		if (!ctx || !thread || thread.turns.length === 0) return false;
+		if (!ctx || !thread || thread.retired || thread.turns.length === 0) return false;
 		if (panel.hidden || panel.sentToAgent) return false;
 		return thread.valid(observer, ctx.sessionManager.getSessionId());
 	}
@@ -329,11 +399,12 @@ export default function piAside(pi: ExtensionAPI): void {
 			thread = new AsideThread(threadHost());
 			panel = { turns: thread.turns };
 		} else if (thread!.busy) {
-			thread!.abort();
+			const waitingThread = thread!;
+			await waitingThread.waitForIdle();
+			if (seq !== askSeq || thread !== waitingThread || panel.hidden) return undefined;
 		}
 		const current = thread!;
-		handoff = undefined;
-		acceptedHandoff = undefined;
+		suggestion = undefined;
 		panel.hidden = false;
 		panel.sentToAgent = undefined;
 		panel.scrollTop = undefined;
@@ -358,8 +429,8 @@ export default function piAside(pi: ExtensionAPI): void {
 			// The aside failed before its route line: the text keeps Pi's meaning.
 			panel.sentToAgent = { text: question, waiting: wasWaiting };
 			sendToAgent(question);
-		} else if (!routedToAgent && parsed.handoff && !turn.error && !turn.aborted) {
-			handoff = { text: parsed.handoff, note: sideNote(turn, parsed.body) };
+		} else if (!routedToAgent && parsed.next && !turn.error && !turn.aborted) {
+			suggestion = parsed.next;
 		}
 		noteTier(turn);
 		reportStatus(turn);
@@ -370,10 +441,6 @@ export default function piAside(pi: ExtensionAPI): void {
 		renderNow();
 		refreshBelow();
 		return turn;
-	}
-
-	function sideNote(turn: TurnView, answer: string): string {
-		return `Side note the user brought back from an aside (a side conversation you did not see):\n\nQ: ${turn.question}\nA: ${answer}`;
 	}
 
 	function noteTier(turn: TurnView): void {
@@ -461,7 +528,7 @@ export default function piAside(pi: ExtensionAPI): void {
 			let answer = parsed.body;
 			if (turn.error) answer += `${answer ? "\n\n" : ""}aside failed: ${turn.error}`;
 			if (turn.aborted) answer += `${answer ? "\n\n" : ""}(stopped)`;
-			if (parsed.handoff) answer += `\n\nhandoff: ${parsed.handoff}`;
+			for (const relay of turn.relays ?? []) answer += `\n\n→ to the agent\n${relay.message}\n${relay.read ? "It has read this." : "It will see this after its current step."}`;
 			const steps = turn.steps.map((step) => `${step.ok ? "✓" : "✗"} ${step.label}`);
 			const hash = thread?.fork?.pHash ? ` · p ${thread.fork.pHash.slice(0, 12)}` : "";
 			return { question: turn.question, answer, detail: `${detail(turn)}${hash}`, steps };
@@ -558,7 +625,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		askSeq++;
 		if (thread?.busy) thread.abort();
 		panel.hidden = true;
-		handoff = undefined;
+		suggestion = undefined;
 		renderNow();
 		refreshBelow();
 		return true;
@@ -580,9 +647,9 @@ export default function piAside(pi: ExtensionAPI): void {
 			return { handled: true };
 		}
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
-		const [from, to] = closeZone(event.width);
-		const onClose = panel.mouse && event.y === 0 && event.x >= from && event.x <= to;
-		const onMore = panelLast.readerRows?.includes(event.y) ?? false;
+		const hit = panelHit(panelLast, event.width, event.x, event.y, !!panel.mouse);
+		const onClose = hit === "close";
+		const onMore = hit === "reader";
 		if (!onClose && !onMore) return undefined;
 		// The press makes the panel the target of the click that follows on the same cell.
 		if (event.type === "click") {
@@ -626,7 +693,7 @@ export default function piAside(pi: ExtensionAPI): void {
 							return view.lines;
 						},
 						handleMouse: panelMouse,
-						invalidate() {},
+						invalidate() { },
 					};
 				},
 				{ placement: "aboveEditor" },
@@ -636,9 +703,9 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 	}
 
-	function belowState(): { hint: HintKind; ghost: string | undefined } {
+	function belowState(): { hint: HintKind; next: string | undefined } {
 		const ctx = ctxRef;
-		if (!ctx || ctx.mode !== "tui") return { hint: undefined, ghost: undefined };
+		if (!ctx || ctx.mode !== "tui") return { hint: undefined, next: undefined };
 		let text = "";
 		try {
 			text = ctx.ui.getEditorText();
@@ -647,18 +714,19 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 		const side = routeEnter({ text, busy: busy(), key: "submit" }) === "side" && endsWithQuestionMark(text);
 		const hint: HintKind = side ? (continues() ? "follow" : "ask") : undefined;
-		const ghost = handoff && text.trim() === "" ? handoff.text : undefined;
-		return { hint, ghost };
+		if (text !== "") { suggestion = undefined; childHint = undefined; }
+		const next = text === "" ? suggestion : undefined;
+		return { hint, next };
 	}
 
-	let belowCache: { hint: HintKind; ghost: string | undefined } = { hint: undefined, ghost: undefined };
+	let belowCache: { hint: HintKind; next: string | undefined } = { hint: undefined, next: undefined };
 
 	function refreshBelow(): void {
 		const ctx = ctxRef;
 		if (!ctx || ctx.mode !== "tui") return;
 		const state = belowState();
 		belowCache = state;
-		const show = state.hint !== undefined || state.ghost !== undefined;
+		const show = state.hint !== undefined || state.next !== undefined || childHint !== undefined;
 		try {
 			if (show !== belowShown) {
 				belowShown = show;
@@ -668,7 +736,7 @@ export default function piAside(pi: ExtensionAPI): void {
 						BELOW_WIDGET,
 						(tui: Any, theme: Any) => {
 							tuiRef = tui;
-							return { render: (width: number) => renderBelow(belowCache, width, theme), invalidate() {} };
+							return { render: (width: number) => childHint && !belowCache.next ? plainText(theme.fg("dim", childHint), width) : renderBelow(belowCache, width, theme), invalidate() { } };
 						},
 						{ placement: "belowEditor" },
 					);
@@ -723,17 +791,17 @@ export default function piAside(pi: ExtensionAPI): void {
 				more(action);
 				return { consume: true };
 			}
-			if (handoff && kb.matches(data, "tui.input.tab")) {
+			if ((suggestion || childHint) && editorFocused() && kb.matches(data, "tui.input.tab")) {
 				let text = "";
 				try {
 					text = ctxRef?.ui.getEditorText() ?? "";
 				} catch {
 					text = "";
 				}
-				if (text.trim() === "") {
-					ctxRef?.ui.setEditorText(handoff.text);
-					acceptedHandoff = handoff;
-					handoff = undefined;
+				if (text === "") {
+					ctxRef?.ui.setEditorText(suggestion ? `/aside ${suggestion}` : childHint!);
+					childHint = undefined;
+					suggestion = undefined;
 					setTimeout(refreshBelow, 0);
 					return { consume: true };
 				}

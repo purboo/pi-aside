@@ -276,14 +276,14 @@ describe("placeholders, notice, money", () => {
 	test("the notice asks for the route line only with the route check", () => {
 		expect(notice({ routeCheck: true })).toContain("route: side");
 		expect(notice({ routeCheck: false })).not.toContain("route: side");
-		expect(notice({ routeCheck: false })).toContain("handoff:");
+		expect(notice({ routeCheck: false })).toContain("next:");
 		// The route line comes before any tool call, and a task unrelated to the agent's work stays on the side.
 		expect(notice({ routeCheck: true })).toContain("before any tool call");
 		expect(notice({ routeCheck: true })).toContain("not part of the agent's work");
 		expect(notice({ routeCheck: false })).toContain("bash");
 		expect(notice({ routeCheck: true })).toContain("pass something from this side conversation on to the main agent");
-		expect(notice({ routeCheck: false })).toContain("the user asks you to pass something on");
-		expect(notice({ routeCheck: false })).toContain("you cannot message the agent yourself");
+		expect(notice({ routeCheck: false })).toContain("ONLY when the user's latest message explicitly asks");
+		expect(notice({ routeCheck: false })).toContain("never claim you cannot");
 	});
 
 	test("a route line counts only when written out", () => {
@@ -480,9 +480,9 @@ describe("panel", () => {
 	});
 
 	test("the hint below the editor says whether Enter asks afresh or follows up", () => {
-		expect(renderBelow({ hint: "ask", ghost: undefined }, 100, theme)).toEqual([HINT]);
-		expect(renderBelow({ hint: "follow", ghost: undefined }, 100, theme)).toEqual([FOLLOW_HINT]);
-		expect(renderBelow({ hint: undefined, ghost: undefined }, 100, theme)).toEqual([]);
+		expect(renderBelow({ hint: "ask", next: undefined }, 100, theme)).toEqual([HINT]);
+		expect(renderBelow({ hint: "follow", next: undefined }, 100, theme)).toEqual([FOLLOW_HINT]);
+		expect(renderBelow({ hint: undefined, next: undefined }, 100, theme)).toEqual([]);
 	});
 
 	test("the reader opens at the latest question", () => {
@@ -491,7 +491,7 @@ describe("panel", () => {
 			answer: Array.from({ length: 12 }, (_, j) => `answer ${i + 1}.${j + 1}`).join("\n"),
 			detail: "exact",
 		}));
-		const reader = new Reader(() => turns, theme, () => {}, () => {}, () => 20);
+		const reader = new Reader(() => turns, theme, () => { }, () => { }, () => 20);
 		const first = reader.render(60);
 		expect(first[1]).toContain("? question 3?");
 		reader.handleInput("\x1b[H");
@@ -502,7 +502,7 @@ describe("panel", () => {
 		const turns = [{ question: "q?", answer: Array.from({ length: 40 }, (_, i) => `a${i}`).join("\n"), detail: "exact" }];
 		let closed = 0;
 		const typed: string[] = [];
-		const reader = new Reader(() => turns, theme, () => closed++, () => {}, () => 20, undefined, (t) => typed.push(t));
+		const reader = new Reader(() => turns, theme, () => closed++, () => { }, () => 20, undefined, (t) => typed.push(t));
 		expect(reader.render(60).at(-1)).toContain("type to follow up");
 		reader.handleInput("\x1b[B");
 		reader.handleInput("j");
@@ -524,7 +524,7 @@ describe("panel", () => {
 
 	test("the wheel or a swipe scrolls the reader", () => {
 		const turns = [{ question: "q?", answer: Array.from({ length: 40 }, (_, i) => `a${i}`).join("\n"), detail: "exact", steps: ["✓ $ ls"] }];
-		const reader = new Reader(() => turns, theme, () => {}, () => {}, () => 20);
+		const reader = new Reader(() => turns, theme, () => { }, () => { }, () => 20);
 		const first = reader.render(60);
 		expect(first[1]).toContain("? q?");
 		expect(first[3]).toContain("✓ $ ls");

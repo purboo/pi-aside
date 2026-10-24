@@ -28,7 +28,7 @@ export function modelsJson(baseUrl: string): unknown {
 		contextWindow: 200000,
 		maxTokens: 16000,
 		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-		...(compat ? { compat } : {}),
+		compat: { supportsMidConvoSystemMessages: true, ...(id.startsWith("claude") ? { supportsMidConvoToolChanges: true } : id.startsWith("gpt") ? { supportsAdditionalTools: true } : { supportsMidConvoToolAdditions: true }), ...compat },
 	});
 	return {
 		providers: {
@@ -36,7 +36,7 @@ export function modelsJson(baseUrl: string): unknown {
 				baseUrl,
 				api: PROVIDERS.anthropic.api,
 				apiKey: PROVIDERS.anthropic.key,
-				models: [model(PROVIDERS.anthropic.model, true), model("claude-plain", false), model("claude-effort", true, { supportsMidConvoEffort: true, forceAdaptiveThinking: true })],
+				models: [model(PROVIDERS.anthropic.model, true), model("claude-plain", false), model("claude-legacy", true, { supportsMidConvoSystemMessages: false, supportsMidConvoToolChanges: false }), model("claude-effort", true, { supportsMidConvoEffort: true, forceAdaptiveThinking: true })],
 			},
 			[PROVIDERS.responses.provider]: {
 				baseUrl: `${baseUrl}/v1`,
@@ -144,7 +144,7 @@ export class PiRpc {
 
 	async waitFor<T>(probe: () => T | undefined, timeoutMs = 20_000, what = "condition"): Promise<T> {
 		const deadline = Date.now() + timeoutMs;
-		for (;;) {
+		for (; ;) {
 			const value = probe();
 			if (value !== undefined && value !== false) return value;
 			const left = deadline - Date.now();
