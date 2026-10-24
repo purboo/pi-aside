@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3
+
+- Messages a moved-out window sent while the main Pi was not running now arrive as one message when the session
+  is resumed, instead of one steer after another: oldest first, each with its send time, identical re-sends
+  shown once (`×2`), and the agent is told that some may repeat an earlier request or be out of date.
+
 ## 0.5.2
 
 - Fixed: after the main Pi restarted, messages from a moved-out window were reported as delivered but never

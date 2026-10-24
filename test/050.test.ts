@@ -1,12 +1,12 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync, existsSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { parseReply, sanitizeSuggestion } from "../src/reply.ts";
 import { panelHit, panelView, renderBelow } from "../src/panel.ts";
-import { Inbox, inboxOnline, inboxPath, inboxSession, legacyInboxPaths, postInbox, promotionOptions, tmuxCommand, uniqueName, writePromotedSession } from "../src/promotion.ts";
+import { backlogNote, collectBacklog, Inbox, type InboxDelivery, inboxOnline, inboxPath, inboxSession, legacyInboxPaths, postInbox, promotionOptions, tmuxCommand, uniqueName, writePromotedSession } from "../src/promotion.ts";
 import { notice } from "../src/thread.ts";
 
 const dirs: string[] = [];
@@ -210,4 +210,44 @@ test("inboxes are per session, and pre-0.5.2 per-process inboxes of the session 
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = previous;
 	}
+});
+
+test("messages waiting at start are marked as backlog with their send times; live ones are not", async () => {
+	const dir = temp();
+	postInbox(dir, { name: "camera", message: "second", sentAt: 2_000 });
+	postInbox(dir, { name: "camera", message: "first", sentAt: 1_000 });
+	// A pre-0.5.3 file has no sentAt: the file time stands in.
+	writeFileSync(join(dir, "legacy.json"), JSON.stringify({ name: "old", message: "from 0.5.1" }));
+	utimesSync(join(dir, "legacy.json"), 500, 500);
+	const got: [InboxDelivery, boolean][] = [];
+	const inbox = new Inbox(dir, (value, backlog) => got.push([value, backlog]), () => { });
+	try {
+		inbox.start();
+		expect(got.map(([value, backlog]) => [value.message, value.sentAt, backlog])).toEqual([["first", 1_000, true], ["second", 2_000, true], ["from 0.5.1", 500_000, true]]);
+		postInbox(dir, { name: "camera", message: "live" });
+		for (let i = 0; i < 50 && got.length < 4; i++) await new Promise(resolve => setTimeout(resolve, 10));
+		expect(got[3]![0].message).toBe("live");
+		expect(got[3]![1]).toBe(false);
+		expect(Math.abs(got[3]![0].sentAt - Date.now())).toBeLessThan(5_000);
+	} finally { inbox.close(); }
+});
+
+test("a backlog becomes one late message: oldest first, exact re-sends collapsed, re-sends and staleness called out", () => {
+	const items = collectBacklog([
+		{ name: "camera-panel", message: "Approved the redesign.", sentAt: new Date(2026, 9, 24, 18, 52).getTime() },
+		{ name: "split", message: "F1 merged.", sentAt: new Date(2026, 9, 24, 18, 10).getTime() },
+		{ name: "camera-panel", message: "Approved the redesign. ", sentAt: new Date(2026, 9, 24, 19, 5).getTime() },
+		{ name: "split", message: "Approved the redesign.", sentAt: new Date(2026, 9, 24, 19, 6).getTime() },
+	]);
+	expect(items.map(item => [item.name, item.times])).toEqual([["split", 1], ["camera-panel", 2], ["split", 1]]);
+	const note = backlogNote(items);
+	expect(note).toContain("sent 3 messages");
+	expect(note).toContain("oldest first");
+	expect(note).toContain("do not act on it twice");
+	expect(note).toContain("out of date");
+	expect(note.indexOf("### 1. aside:split · sent 10-24 18:10")).toBeGreaterThan(0);
+	expect(note).toContain("### 2. aside:camera-panel · sent 10-24 18:52 (sent 2×)");
+	const one = backlogNote(collectBacklog([{ name: "notes", message: "hi", sentAt: 0 }]));
+	expect(one).toContain("this message");
+	expect(one).not.toContain("act on it twice");
 });

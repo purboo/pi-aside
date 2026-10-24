@@ -229,7 +229,10 @@ removed and reported. Watchers close on session replacement/shutdown. A listenin
 removes it on close: the child's `tell_agent` reports "Delivered" only while that pid is alive, and otherwise
 "Queued" with `pi --session <id>`. The latest live Pi on a session owns the inbox, so two never deliver one
 message twice. On start the parent also drains and watches pre-0.5.2 `<session-id>-<pid>` inboxes of its session,
-which windows opened by older versions still write to. A child with `PI_ASIDE_PARENT` registers a
+which windows opened by older versions still write to. Since 0.5.3 each file carries `sentAt` (older files use their
+mtime) and a time-prefixed name; whatever all of the session's inboxes hold at start is collected (`backlog`), sorted,
+exact re-sends from one window collapsed (`collectBacklog`), and sent as one steer (`backlogNote`) with send times and
+a dedupe/staleness note. If that send throws, the messages are posted back to the session inbox. A child with `PI_ASIDE_PARENT` registers a
 normal main-agent `tell_agent` tool writing into that inbox. Its new model/tool usage belongs to its independent Pi.
 
 ### 2.13 Panel touch boundary and bottom line (0.5.0)
