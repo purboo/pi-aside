@@ -345,7 +345,7 @@ describe("0.5.0 relays, continuation and promotion", () => {
 			await pi.waitForAgentEnd();
 			const files = readdirSync(inbox).filter(name => name.endsWith(".json"));
 			expect(files).toHaveLength(1);
-			expect(JSON.parse(readFileSync(join(inbox, files[0]!), "utf8"))).toEqual({ name: "disk-cleanup", message: "The user asks me to report that disk cleanup is complete." });
+			expect(JSON.parse(readFileSync(join(inbox, files[0]!), "utf8"))).toEqual({ name: "disk-cleanup", message: "The user asks me to report that disk cleanup is complete.", sentAt: expect.any(Number) });
 			expect(JSON.stringify(server.requests.at(-1)!.body)).toContain("Delivered to the parent inbox.");
 			// The parent Pi exited: the message is kept, and the window must not claim delivery.
 			rmSync(join(inbox, "owner"));

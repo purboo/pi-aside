@@ -30,7 +30,7 @@ import { installFinalPayloadTap } from "./tap.ts";
 import { currentSettings } from "./transport.ts";
 import { UsageQueue } from "./usage.ts";
 import { existsSync } from "node:fs";
-import { Inbox, inboxOnline, inboxPath, inboxSession, legacyInboxPaths, postInbox, promotionOptions, shellQuote, tmuxCommand, uniqueName, writePromotedSession } from "./promotion.ts";
+import { backlogNote, collectBacklog, Inbox, type InboxDelivery, inboxOnline, inboxPath, inboxSession, legacyInboxPaths, postInbox, promotionOptions, sentTime, shellQuote, tmuxCommand, uniqueName, writePromotedSession } from "./promotion.ts";
 
 // biome-ignore lint: Pi's event and UI types are used structurally where they are not exported.
 type Any = any;
@@ -302,8 +302,15 @@ export default function piAside(pi: ExtensionAPI): void {
 			if (relay) { relay.read = true; relays.delete(relay.id); renderNow(); }
 		}
 	});
-	pi.registerMessageRenderer<{ name: string; message: string }>(SIDE_NOTE_TYPE, (message, _options, theme) => ({
-		render: width => plainText(`${message.details?.name ?? "aside"} › ${message.details?.message ?? message.content}`, width).map(line => theme.fg("accent", line)), invalidate() { },
+	pi.registerMessageRenderer<{ name: string; message: string; backlog?: { name: string; message: string; sentAt: number; times: number }[] }>(SIDE_NOTE_TYPE, (message, _options, theme) => ({
+		render: width => {
+			const backlog = message.details?.backlog;
+			if (!backlog) return plainText(`${message.details?.name ?? "aside"} › ${message.details?.message ?? message.content}`, width).map(line => theme.fg("accent", line));
+			return [
+				...plainText(theme.fg("dim", `aside › ${backlog.length} queued while Pi was offline`), width),
+				...backlog.flatMap(item => plainText(`aside:${item.name} · ${sentTime(item.sentAt)}${item.times > 1 ? ` ×${item.times}` : ""} › ${item.message}`, width).map(line => theme.fg("accent", line))),
+			];
+		}, invalidate() { },
 	}));
 	pi.registerEntryRenderer<{ name: string; index: string; target: string }>("aside-window", (entry, _options, theme) => ({
 		render: width => plainText(theme.fg("dim", `↗ aside:${entry.data?.name} · window ${entry.data?.index}`), width), invalidate() { },
@@ -334,13 +341,28 @@ export default function piAside(pi: ExtensionAPI): void {
 		const id = ctxRef!.sessionManager.getSessionId();
 		const dir = inboxPath(id);
 		if (inboxes.length === 0) {
+			// What waited in any of the session's inboxes arrives as one late message, not a burst of steers.
+			const waiting: InboxDelivery[] = [];
 			for (const path of [dir, ...legacyInboxPaths(id)]) {
-				const inbox = new Inbox(path, value => deliver(value.message, `aside:${value.name}`), error => ctxRef?.ui.notify(`aside: ${String(error)}`, "error"));
+				const inbox = new Inbox(path, (value, backlog) => backlog ? waiting.push(value) : deliver(value.message, `aside:${value.name}`), error => ctxRef?.ui.notify(`aside: ${String(error)}`, "error"));
 				inbox.start();
 				inboxes.push(inbox);
 			}
+			if (waiting.length > 0) {
+				try { deliverBacklog(waiting); } catch (error) {
+					// Put them back so the next scan retries them.
+					for (const value of waiting) postInbox(dir, value);
+					ctxRef?.ui.notify(`aside: ${String(error)}`, "error");
+				}
+			}
 		}
 		return dir;
+	}
+	function deliverBacklog(values: InboxDelivery[]): void {
+		const items = collectBacklog(values);
+		const relay: Relay = { id: crypto.randomUUID(), message: items.map(item => item.message).join("\n\n"), read: !running() };
+		relays.set(relay.id, relay);
+		pi.sendMessage({ customType: SIDE_NOTE_TYPE, content: backlogNote(items), display: true, details: { id: relay.id, name: "aside", message: relay.message, backlog: items } }, { triggerTurn: true, deliverAs: "steer" });
 	}
 	function closeInboxes(): void {
 		for (const inbox of inboxes) inbox.close();

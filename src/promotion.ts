@@ -1,6 +1,6 @@
 // Session promotion and the small file inbox shared with independent Pi windows.
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, watch, writeFileSync, type FSWatcher } from "node:fs";
 import { basename, join } from "node:path";
 import { getAgentDir, SessionManager } from "@earendil-works/pi-coding-agent";
 import { withPlaceholders } from "./fork.ts";
@@ -65,7 +65,9 @@ export function writePromotedSession(options: { cwd: string; branch: Any[]; hist
 	return file;
 }
 
-export interface InboxMessage { message: string; name: string }
+/** `sentAt` (epoch ms) is set by the sender; files from Pi 0.5.2 and earlier lack it and fall back to the file time. */
+export interface InboxMessage { message: string; name: string; sentAt?: number }
+export type InboxDelivery = InboxMessage & { sentAt: number };
 // One inbox per session, not per process: a restarted Pi that resumes the session reads what its windows sent meanwhile.
 export function inboxPath(sessionId: string): string {
 	return join(getAgentDir(), "aside-inbox", safeId(sessionId));
@@ -97,17 +99,42 @@ export function inboxOnline(dir: string): boolean {
 	const pid = ownerOf(dir);
 	return pid !== undefined && alive(pid);
 }
+export interface BacklogItem { name: string; message: string; sentAt: number; times: number }
+/** Messages sent while no Pi listened, oldest first; identical re-sends from one window collapse into one item. */
+export function collectBacklog(values: InboxDelivery[]): BacklogItem[] {
+	const items: BacklogItem[] = [];
+	for (const value of [...values].sort((a, b) => a.sentAt - b.sentAt)) {
+		const same = items.find(item => item.name === value.name && item.message.trim() === value.message.trim());
+		if (same) same.times++;
+		else items.push({ name: value.name, message: value.message, sentAt: value.sentAt, times: 1 });
+	}
+	return items;
+}
+export function sentTime(ms: number): string {
+	const d = new Date(ms), pad = (n: number) => String(n).padStart(2, "0");
+	return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+/** One message for the whole backlog, so the agent sees it at once, knows it is late, and can tell re-sends apart. */
+export function backlogNote(items: BacklogItem[]): string {
+	const head = `While this session's Pi was not running, the user's aside windows sent ${items.length === 1 ? "this message" : `${items.length} messages`}. ${items.length === 1 ? "It is" : "They are listed oldest first,"} delivered late, with send times (local).`
+		+ (items.length > 1 ? " The user may have re-sent one when it seemed lost: treat messages that repeat an earlier one as a single request and do not act on it twice." : "")
+		+ " Some may already be out of date; check before acting.";
+	return [head, ...items.map((item, i) => `### ${i + 1}. aside:${item.name} · sent ${sentTime(item.sentAt)}${item.times > 1 ? ` (sent ${item.times}×)` : ""}\n\n${item.message}`)].join("\n\n");
+}
 export function postInbox(dir: string, value: InboxMessage): void {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	const temp = join(dir, `${randomUUID()}.tmp`);
-	writeFileSync(temp, JSON.stringify(value), { mode: 0o600 });
+	const sentAt = value.sentAt ?? Date.now();
+	// The time prefix keeps a sorted scan in send order.
+	const temp = join(dir, `${String(sentAt).padStart(15, "0")}-${randomUUID()}.tmp`);
+	writeFileSync(temp, JSON.stringify({ ...value, sentAt }), { mode: 0o600 });
 	renameSync(temp, temp.replace(/\.tmp$/, ".json"));
 }
 
 /** Atomic child writes; synchronous scanning prevents duplicate delivery from coalesced fs.watch events. */
 export class Inbox {
 	private watcher: FSWatcher | undefined;
-	constructor(readonly dir: string, private readonly deliver: (value: InboxMessage) => void, private readonly onError: (error: unknown) => void) { }
+	/** `backlog` is true for messages already waiting when this Pi started reading: they were sent while no Pi listened. */
+	constructor(readonly dir: string, private readonly deliver: (value: InboxDelivery, backlog: boolean) => void, private readonly onError: (error: unknown) => void) { }
 	start(): void {
 		mkdirSync(this.dir, { recursive: true, mode: 0o700 });
 		// The latest Pi on the session takes the inbox; a second live Pi stops reading so nothing is delivered twice.
@@ -115,7 +142,7 @@ export class Inbox {
 		this.watcher = watch(this.dir, () => this.scan());
 		this.watcher.on("error", this.onError);
 		this.watcher.unref();
-		this.scan();
+		this.scan(true);
 	}
 	private owns(): boolean {
 		const pid = ownerOf(this.dir);
@@ -124,7 +151,7 @@ export class Inbox {
 		try { writeFileSync(join(this.dir, OWNER), String(process.pid), { mode: 0o600 }); } catch { return false; }
 		return true;
 	}
-	scan(): void {
+	scan(backlog = false): void {
 		if (!this.watcher || !this.owns()) return;
 		for (const name of readdirSync(this.dir).filter(name => name.endsWith(".json")).sort()) {
 			const file = join(this.dir, name);
@@ -133,7 +160,8 @@ export class Inbox {
 				if (typeof value.message !== "string" || !value.message.trim() || typeof value.name !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.name)) {
 					unlinkSync(file); this.onError(new Error("Invalid aside inbox message")); continue;
 				}
-				this.deliver(value);
+				const sentAt = typeof value.sentAt === "number" && Number.isFinite(value.sentAt) ? value.sentAt : statSync(file).mtimeMs;
+				this.deliver({ name: value.name, message: value.message, sentAt }, backlog);
 				unlinkSync(file);
 			} catch (error) { this.onError(error); }
 		}
