@@ -1,4 +1,4 @@
-// docs/ux.md §3.1 (question-mark rule, U9), §3.3 (handoff line), §3.4 (route line).
+// docs/ux.md §3.1 (question-mark rule, U9), §3.3 (next line), §3.4 (route line).
 import { expect, test } from "bun:test";
 import { endsWithQuestionMark, routeEnter } from "../src/qmark.ts";
 import { parseReply } from "../src/reply.ts";
@@ -67,34 +67,34 @@ for (const [input, want] of r) check(`routeEnter(${JSON.stringify(input)})`, rou
 // --- parseReply (ux §3.3, §3.4) ---
 type R = ReturnType<typeof parseReply>;
 const p: Array<[string, boolean, R]> = [
-	["route: side\nA touches three callers.", true, { route: "side", body: "A touches three callers.", handoff: undefined }],
-	["route: agent\n", true, { route: "agent", body: "", handoff: undefined }],
-	["route: side", true, { route: "side", body: "", handoff: undefined }],
-	["route: side", false, { route: undefined, body: "", handoff: undefined }],
-	["rou", false, { route: undefined, body: "", handoff: undefined }],
-	["route:", false, { route: undefined, body: "", handoff: undefined }],
-	["", false, { route: undefined, body: "", handoff: undefined }],
-	["\n  Route: AGENT  \nbecause", true, { route: "agent", body: "because", handoff: undefined }],
-	["`route: side`\nok", true, { route: "side", body: "ok", handoff: undefined }],
-	["**route: side**\nok", true, { route: "side", body: "ok", handoff: undefined }],
-	["route : side\nok", true, { route: "side", body: "ok", handoff: undefined }],
-	["route: side\nstreaming so f", false, { route: "side", body: "streaming so f", handoff: undefined }],
-	["The answer is 42.", true, { route: "side", body: "The answer is 42.", handoff: undefined }],
-	["The answer is", false, { route: "side", body: "The answer is", handoff: undefined }],
+	["route: side\nA touches three callers.", true, { route: "side", body: "A touches three callers.", next: undefined }],
+	["route: agent\n", true, { route: "agent", body: "", next: undefined }],
+	["route: side", true, { route: "side", body: "", next: undefined }],
+	["route: side", false, { route: undefined, body: "", next: undefined }],
+	["rou", false, { route: undefined, body: "", next: undefined }],
+	["route:", false, { route: undefined, body: "", next: undefined }],
+	["", false, { route: undefined, body: "", next: undefined }],
+	["\n  Route: AGENT  \nbecause", true, { route: "agent", body: "because", next: undefined }],
+	["`route: side`\nok", true, { route: "side", body: "ok", next: undefined }],
+	["**route: side**\nok", true, { route: "side", body: "ok", next: undefined }],
+	["route : side\nok", true, { route: "side", body: "ok", next: undefined }],
+	["route: side\nstreaming so f", false, { route: "side", body: "streaming so f", next: undefined }],
+	["The answer is 42.", true, { route: "side", body: "The answer is 42.", next: undefined }],
+	["The answer is", false, { route: "side", body: "The answer is", next: undefined }],
 	[
-		"route: side\nUse A.\nhandoff: switch to approach A (see side note)",
+		"route: side\nUse A.\nnext: switch to approach A (see side note)",
 		true,
-		{ route: "side", body: "Use A.", handoff: "switch to approach A (see side note)" },
+		{ route: "side", body: "Use A.", next: "switch to approach A (see side note)" },
 	],
-	["route: side\nUse A.\nhandoff: do B\n\n", true, { route: "side", body: "Use A.", handoff: "do B" }],
-	["route: side\nUse A.\nHandoff:  do B  ", true, { route: "side", body: "Use A.", handoff: "do B" }],
-	["route: side\nUse A.\nhandoff: none", true, { route: "side", body: "Use A.", handoff: undefined }],
-	["route: side\nUse A.\nhandoff:", true, { route: "side", body: "Use A.", handoff: undefined }],
-	["route: side\nUse A.\nhandoff: swi", false, { route: "side", body: "Use A.", handoff: undefined }],
-	["route: side\nUse A.\nhand", false, { route: "side", body: "Use A.", handoff: undefined }],
-	["route: side\nhandoff: x\nmore text", true, { route: "side", body: "handoff: x\nmore text", handoff: undefined }],
-	["route: side\r\nWindows\r\n", true, { route: "side", body: "Windows", handoff: undefined }],
-	["route: side\n\nPara one.\n\nPara two.\n", true, { route: "side", body: "Para one.\n\nPara two.", handoff: undefined }],
+	["route: side\nUse A.\nnext: do B\n\n", true, { route: "side", body: "Use A.", next: "do B" }],
+	["route: side\nUse A.\nNext:  do B  ", true, { route: "side", body: "Use A.", next: "do B" }],
+	["route: side\nUse A.\nnext: none", true, { route: "side", body: "Use A.", next: undefined }],
+	["route: side\nUse A.\nnext:", true, { route: "side", body: "Use A.", next: undefined }],
+	["route: side\nUse A.\nnext: swi", false, { route: "side", body: "Use A.", next: undefined }],
+	["route: side\nUse A.\nnex", false, { route: "side", body: "Use A.", next: undefined }],
+	["route: side\nnext: x\nmore text", true, { route: "side", body: "next: x\nmore text", next: undefined }],
+	["route: side\r\nWindows\r\n", true, { route: "side", body: "Windows", next: undefined }],
+	["route: side\n\nPara one.\n\nPara two.\n", true, { route: "side", body: "Para one.\n\nPara two.", next: undefined }],
 ];
-const norm = (x: R) => ({ route: x.route ?? null, body: x.body, handoff: x.handoff ?? null });
+const norm = (x: R) => ({ route: x.route ?? null, body: x.body, next: x.next ?? null });
 for (const [raw, done, want] of p) check(`parseReply(${JSON.stringify(raw)}, ${done})`, norm(parseReply(raw, done)), norm(want));

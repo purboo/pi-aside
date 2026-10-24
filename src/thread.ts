@@ -11,13 +11,17 @@ import type { UsageQueue } from "./usage.ts";
 type Any = any;
 
 export const MAX_TOOL_ROUNDS = 24;
+export const INTERNAL_TOOLS = [
+	{ name: "tell_agent", description: "Relay a self-contained message to the main agent ONLY on the user's explicit request.", parameters: { type: "object", properties: { message: { type: "string" } }, required: ["message"], additionalProperties: false } },
+	{ name: "move_out", description: "Move this aside to its own Pi window ONLY on the user's explicit request.", parameters: { type: "object", properties: { name: { type: "string" }, hint: { type: "string" } }, additionalProperties: false } },
+];
 /** Built-in tools that only read: their calls pass as an activity line and are not kept as steps. */
 export const READING_TOOLS = ["read", "grep", "find", "ls"] as const;
 
 export function notice(options: { routeCheck: boolean }): string {
 	const lines = [
 		"<aside>",
-		"The user is asking this on the side, in a temporary side conversation, while the main agent keeps working. The main agent does not see this exchange. Nothing said here reaches the main session unless the user sends it back.",
+		"The user is asking this on the side, in a temporary side conversation, while the main agent keeps working. The main agent does not see this exchange. Only an explicit user request to relay something authorizes sending it to the main agent.",
 		"Answer the question or do the task directly and briefly, in the language of the user's message. The main session's callable tools (including read, bash, edit, write, grep, find and ls when enabled) run here with the same validation and permission checks. Tools that Pi cannot call from another tool are unavailable here. Leave the main agent's own work alone: do not change the files, processes or state it is working on.",
 	];
 	if (options.routeCheck) {
@@ -26,8 +30,10 @@ export function notice(options: { routeCheck: boolean }): string {
 		);
 	}
 	lines.push(
-		"If the user asks you to pass something on to the main agent (tell it, let it know, relay, forward), write in your answer the self-contained message the agent needs, including the relevant findings from this conversation, and end with the handoff line below. The user sends it; you cannot message the agent yourself.",
-		"End with one line `handoff: <one short instruction to the agent, in the user's language>` if, and only if, the user asks you to pass something on, or your answer shows that the main agent should change what it is doing. Otherwise do not write that line.",
+		"Call tell_agent({message}) ONLY when the user's latest message explicitly asks you to tell/pass/relay something to the main agent, in any language. Never on your own initiative. The message must be self-contained: the main agent never saw this aside conversation. You can reach the agent with this tool; never claim you cannot. Its result tells you whether delivery is queued or read, so a brief confirmation is enough.",
+		"Call move_out({name, hint}) ONLY on an explicit request to move this aside to its own window. Choose 2–3 lowercase English words in kebab case for name and one placeholder sentence in the conversation language for hint (for example: tell the agent when you're done). Do not make a separate naming request.",
+		"You may end with one hidden last line `next: <what the user would say next>` only when there is an obvious next step; usually omit it. One short sentence, in the user's words and conversation language. Never add the /aside prefix. You may suggest telling the agent, but do not send without an explicit request.",
+		"After a round-limit tool result, summarize done ✓ and left …, then stop with a next: line suggesting continuation. If much work remains, suggest moving this to its own window instead.",
 		"</aside>",
 	);
 	return lines.join("\n");
@@ -41,7 +47,7 @@ export interface Step {
 
 export interface TurnView {
 	question: string;
-	/** The answer text so far, route and handoff lines included. */
+	/** The answer text so far, route and next lines included. */
 	raw: string;
 	done: boolean;
 	error?: string;
@@ -49,6 +55,7 @@ export interface TurnView {
 	activity?: string;
 	/** Finished calls of tools that may change something, in order. */
 	steps: Step[];
+	relays?: Relay[];
 	/** The model's (summarized) thinking in the current request, while no answer text has arrived. */
 	thinking?: string;
 	/** When the question was asked, and when the answer's first text arrived (ms since the epoch). */
@@ -66,6 +73,8 @@ export interface TurnView {
 	aborted?: boolean;
 }
 
+export interface Relay { id: string; message: string; read: boolean }
+
 export interface ThreadHost {
 	env: ForkEnv;
 	observer: Observer;
@@ -74,6 +83,8 @@ export interface ThreadHost {
 	sessionId: () => string;
 	/** Execute through the main session's validation and permission hooks; unavailable means fail closed. */
 	executeTool?: ToolExecutor;
+	tellAgent?: (message: string) => Relay;
+	moveOut?: (thread: AsideThread, args: { name?: string; hint?: string }, signal: AbortSignal) => Promise<void>;
 	onUpdate: () => void;
 }
 
@@ -105,6 +116,10 @@ export function oneLine(text: unknown, max = 80): string {
 export function activityFor(call: Any): string {
 	const args = call.arguments ?? {};
 	switch (call.name) {
+		case "move_out":
+			return "moving to its own window…";
+		case "tell_agent":
+			return "telling the agent";
 		case "read":
 			return `reading ${args.path ?? ""}`.trim();
 		case "grep":
@@ -151,6 +166,18 @@ export class AsideThread {
 	fork: Fork | undefined;
 	/** Q1, A1 (with tool rounds), Q2, … over the fork's base. */
 	private exchange: unknown[] = [];
+	/** Ordinary messages retained for promotion, independently of request re-forks. */
+	readonly history: Any[] = [];
+	baseBranch: Any[] = [];
+	private promotion: { name?: string; hint?: string } | undefined;
+	retired = false;
+	private idleWaiters: Array<() => void> = [];
+	private pauseRequested = false;
+	waitForIdle(): Promise<void> {
+		if (!this.busy) return Promise.resolve();
+		this.pauseRequested = true;
+		return new Promise(resolve => this.idleWaiters.push(resolve));
+	}
 	readonly turns: TurnView[] = [];
 	private controller: AbortController | undefined;
 	private contextCount = 0;
@@ -200,6 +227,7 @@ export class AsideThread {
 	/** Ask a question in this thread. Resolves when the answer is complete, failed or aborted. */
 	async ask(question: string, options: { routeCheck: boolean; onRoute?: (route: "side" | "agent") => void }): Promise<TurnView> {
 		this.controller?.abort();
+		this.pauseRequested = false;
 		const turn: TurnView = { question, raw: "", done: false, steps: [], startedAt: Date.now(), cost: 0, read: 0, written: 0 };
 		this.turns.push(turn);
 		const controller = new AbortController();
@@ -231,6 +259,7 @@ export class AsideThread {
 				turn.activity = undefined;
 				const fork = await makeFork(this.host.env, observation, why);
 				signal.throwIfAborted();
+				if (!this.fork) this.baseBranch = structuredClone(this.host.env.sessionManager.getBranch());
 				this.fork = fork;
 				this.exchange = [];
 				this.observationSeq = observation?.seq;
@@ -246,7 +275,9 @@ export class AsideThread {
 				content: [{ type: "text", text: `${notice(options)}\n\n${prefix}${question}` }],
 				timestamp: Date.now(),
 			};
-			const added: unknown[] = [q];
+			const added: unknown[] = [{ role: "system", content: "", toolsAdded: INTERNAL_TOOLS, timestamp: Date.now() }, q];
+			this.history.push({ role: "user", content: question, timestamp: Date.now() });
+			let summary = false;
 			let textBefore = "";
 			for (let round = 0; ; round++) {
 				signal.throwIfAborted();
@@ -266,6 +297,7 @@ export class AsideThread {
 				turn.thinking = undefined;
 				this.account(fork, result, turn);
 				added.push(message);
+				this.history.push(message);
 				turn.raw = textBefore + textOf(message);
 				textBefore = turn.raw;
 				if (message.stopReason === "aborted") throw new DOMException("aborted", "AbortError");
@@ -281,32 +313,56 @@ export class AsideThread {
 				signal.throwIfAborted();
 				const calls = (message.content ?? []).filter((c: Any) => c?.type === "toolCall");
 				if (calls.length === 0 || message.stopReason !== "toolUse") break;
-				if (round + 1 >= MAX_TOOL_ROUNDS) {
-					turn.error = `stopped after ${MAX_TOOL_ROUNDS} tool rounds`;
+				if (summary) {
+					for (const call of calls) {
+						const result = toolResult(call, "Not run: round limit reached. Summarize what is done and what is left, then stop.", true);
+						added.push(result); this.history.push(result);
+					}
 					break;
+				}
+				if (round + 1 >= MAX_TOOL_ROUNDS) {
+					for (const call of calls) {
+						const result = toolResult(call, "Not run: round limit reached. Summarize what is done and what is left, then stop.", true);
+						added.push(result); this.history.push(result);
+					}
+					summary = true;
+					textBefore = "";
+					continue;
 				}
 				// Routing happens before any tool: even a familiar tool name may have a session override.
 				const unrouted = options.routeCheck && route !== "side";
 				for (const call of calls) {
 					signal.throwIfAborted();
 					if (unrouted) {
-						added.push(toolResult(call, "Not run: start your reply with the route line (`route: side` or `route: agent`), then call tools.", true));
+						const result = toolResult(call, "Not run: start your reply with the route line (`route: side` or `route: agent`), then call tools.", true);
+						added.push(result); this.history.push(result);
 						continue;
 					}
 					turn.activity = activityFor(call);
 					update();
 					signal.throwIfAborted();
+					const skippedForFollowup = this.pauseRequested;
 					const outcome = await this.runTool(call, signal, turn);
 					if (signal.aborted) throw new DOMException("aborted", "AbortError");
-					if (!isReading(call.name)) turn.steps.push({ label: activityFor(call), ok: !outcome.isError });
+					if (!skippedForFollowup && !isReading(call.name) && !["tell_agent", "move_out"].includes(call.name)) turn.steps.push({ label: activityFor(call), ok: !outcome.isError });
 					added.push(outcome);
+					this.history.push(outcome);
 				}
+				if (this.promotion || this.pauseRequested) break;
 				turn.activity = undefined;
 				if (textBefore && !textBefore.endsWith("\n")) textBefore += "\n\n";
 				update();
 			}
 			signal.throwIfAborted();
 			this.exchange.push(...added);
+			if (summary && !parseReply(turn.raw, true).next) {
+				const parsed = parseReply(turn.raw, true);
+				turn.raw = `route: ${parsed.route ?? "side"}\n${parsed.body}\nnext: continue`;
+			}
+			if (this.promotion) {
+				const args = this.promotion; this.promotion = undefined;
+				await this.host.moveOut?.(this, args, signal);
+			}
 		} catch (error) {
 			if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
 				turn.aborted = true;
@@ -317,7 +373,10 @@ export class AsideThread {
 			turn.done = true;
 			turn.activity = undefined;
 			turn.thinking = undefined;
-			if (this.controller === controller) this.controller = undefined;
+			if (this.controller === controller) {
+				this.controller = undefined;
+				for (const resolve of this.idleWaiters.splice(0)) resolve();
+			}
 			reportRoute();
 			update();
 		}
@@ -327,6 +386,21 @@ export class AsideThread {
 	private async runTool(call: Any, signal: AbortSignal, turn: TurnView): Promise<Any> {
 		try {
 			signal.throwIfAborted();
+			if (this.pauseRequested) return toolResult(call, "Not run: the user asked a follow-up. Resume if still needed.", true);
+			if (this.promotion) return toolResult(call, "Not run: continuing in the new window.", true);
+			if (call.name === "tell_agent") {
+				const message = call.arguments?.message;
+				if (typeof message !== "string" || !message.trim()) return toolResult(call, "message must be a non-empty string", true);
+				if (!this.host.tellAgent) return toolResult(call, "Delivery is unavailable.", true);
+				const relay = this.host.tellAgent(message.trim());
+				(turn.relays ??= []).push(relay);
+				return toolResult(call, relay.read ? "Delivered. It has read this." : "Queued. It will see this after its current step.", false);
+			}
+			if (call.name === "move_out") {
+				if (!this.host.moveOut) return toolResult(call, "Moving out is unavailable.", true);
+				this.promotion = { name: call.arguments?.name, hint: call.arguments?.hint };
+				return toolResult(call, "Moving to its own window.", false);
+			}
 			if (!this.host.executeTool) return toolResult(call, "Tool execution through Pi's session hooks is unavailable.", true);
 			const outcome = await this.host.executeTool(call.name, call.arguments, signal, (result) => this.accountTool(result, turn));
 			return {

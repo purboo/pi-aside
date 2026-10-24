@@ -41,6 +41,39 @@ async function start(extensions: string[] = [ASIDE], settings?: Record<string, u
 const bodies = (s: CaptureServer) => s.requests.map((r) => JSON.stringify(r.body));
 
 describe("TUI", () => {
+	test("a relay queues behind the main tool and changes to read when Pi injects it", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ toolCalls: [{ name: "bash", arguments: { command: "sleep 2; echo main-step-finished" } }] });
+		tui.type("do the current main step"); tui.key("Enter");
+		await server.waitForRequests(1);
+		await tui.waitForScreen(/sleep 2/);
+		let side = 0;
+		server.respond(request => JSON.stringify(request.body).includes("<aside>")
+			? ++side === 1 ? { text: "route: side\n", toolCalls: [{ name: "tell_agent", arguments: { message: "After this step, retain the routing tests." } }] } : { text: "Queued." }
+			: { text: "Read the relay after completing the main step." });
+		tui.type("/aside tell the agent to retain the routing tests"); tui.key("Enter");
+		await tui.waitForScreen(/It will see this after its current step\./);
+		await tui.waitForScreen(/It has read this\./);
+		const main = server.requests.filter(request => !JSON.stringify(request.body).includes("<aside>"));
+		expect(main).toHaveLength(2);
+		expect(JSON.stringify(main[1]!.body)).toContain("main-step-finished");
+		expect(JSON.stringify(main[1]!.body)).toContain("retain the routing tests");
+	}, 20_000);
+
+	test("tell_agent shows the sent block and aside prefix in the main transcript", async () => {
+		const { server, tui } = await start();
+		let side = 0;
+		server.respond(request => JSON.stringify(request.body).includes("<aside>")
+			? ++side === 1 ? { text: "route: side\n", toolCalls: [{ name: "tell_agent", arguments: { message: "Keep the routing tests." } }] } : { text: "Delivered." }
+			: { text: "I will keep the tests." });
+		tui.type("/aside tell the agent to keep the routing tests"); tui.key("Enter");
+		const screen = await tui.waitForScreen(/It has read this\./);
+		expect(screen).toContain("→ to the agent");
+		expect(screen).toContain("┃ Keep the routing tests.");
+		await tui.waitForScreen(/aside › Keep the routing tests\./);
+		expect(tui.screen()).not.toMatch(/handoff:|tab accepts|⇥/);
+	}, 20_000);
+
 	test("busy + `?`: hint, asks on the side, panel above the editor; the main session never sees it", async () => {
 		const { server, tui } = await start();
 		const hold = deferred();
@@ -187,28 +220,28 @@ describe("TUI", () => {
 		expect(tui.screen()).not.toMatch(/Regular side answer\./);
 	}, 60_000);
 
-	test("handoff: ghost text, Tab accepts into the editor, Enter sends it with the side note", async () => {
+	test("next: placeholder, Tab fills /aside, Enter continues the aside", async () => {
 		const { server, tui } = await start();
 		server.enqueue({ text: "Using approach B.", usage: { input: 50, cacheWrite: 900 } });
 		tui.type("pick an approach");
 		tui.key("Enter");
 		await tui.waitForScreen(/Using approach B\./);
-		server.enqueue({ text: "route: side\nA is safer here.\nhandoff: switch to approach A", usage: { input: 10, cacheRead: 900 } });
+		server.enqueue({ text: "route: side\nA is safer here.\nnext: check approach A", usage: { input: 10, cacheRead: 900 } });
 		tui.type("/aside is B right?");
 		tui.key("Enter");
-		await tui.waitForScreen(/⇥ switch to approach A/);
+		await tui.waitForScreen(/\/aside check approach A/);
 		tui.key("Tab");
 		await sleep(300);
 		const screen = tui.screen();
-		expect(screen).not.toMatch(/⇥ switch to approach A/);
-		expect(screen).toMatch(/^switch to approach A\s*$/m);
+		expect(screen).not.toMatch(/⇥|tab accepts/);
+		expect(screen).toMatch(/^.*\/aside check approach A\s*$/m);
 		server.enqueue({ text: "Switching.", usage: { input: 50, cacheRead: 900 } });
 		const before = server.requests.length;
 		tui.key("Enter");
 		await server.waitForRequests(before + 1);
 		const body = JSON.stringify(server.requests[before]!.body);
-		expect(body).toContain("switch to approach A");
-		expect(body).toContain("Side note the user brought back");
+		expect(body).toContain("check approach A");
+		expect(body).toContain("<aside>");
 		expect(body).toContain("A is safer here.");
 	}, 60_000);
 
