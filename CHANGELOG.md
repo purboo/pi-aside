@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.0
+
+- Ask the aside to tell the main agent: its internal `tell_agent` tool sends a self-contained steer without
+  aborting the current step. The panel shows the sent message and a plain sentence for queued/read status;
+  the main transcript marks the relay `aside ›`.
+- Optional hidden `next:` suggestions appear as gray `/aside …` text beside the empty editor. Tab fills it;
+  Enter follows up on the aside. Typing clears it. The old handoff and side-note relay are removed.
+- At the 24th tool response, skip those calls and request one summary, with a continuation suggestion.
+- Ask to move out: preserve the fork and whole aside in a named, resumable Pi session; open and select an
+  adjacent tmux window, or copy/show a resume command. Promoted windows can relay findings to the parent inbox.
+- Expand the panel's close target to two rows and restrict reader clicks to the visible count text.
+- Completed panels have no cost footer. Usage accounting and the reader's details remain available.
+- Pi 1.3.0 uses a dim line flush with the editor for suggestions to preserve custom editor extensions.
+  Models without native tool additions use the existing conservative rebuilt path.
+
 ## 0.4.1
 
 - Asking the aside to pass something on to the main agent ("tell it what we found") now produces a handoff: the

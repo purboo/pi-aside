@@ -21,8 +21,8 @@ The answer appears above the editor while the agent keeps going:
 ╰────────────────────────────────────────────────────────────────────────╯
 ```
 
-The agent never sees the exchange. Nothing enters the transcript, `/tree` or the model context, and the agent is not
-interrupted.
+The exchange stays on the side. Ask the aside to “tell the agent …” when you want it to relay a self-contained
+message, or “move this to its own window” to continue in a separate Pi.
 
 ## Install
 
@@ -48,7 +48,9 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | Typing in the reader | Closes it and goes on in the editor; the panel opens again, so a `?` follows up. |
 | `/aside <question>` | Asks on the side, busy or not. |
 | `/aside` | Opens the latest side conversation in the reader, at the latest question. Esc closes it. |
-| Tab on an empty editor when `⇥ suggestion` is shown | Accepts the aside's suggested instruction for the agent. Enter sends it, with the side Q&A attached as a note. Ask the aside to "tell the agent …" to get one on purpose. |
+| Tab on an empty editor with a gray `/aside …` suggestion | Fills the suggestion; Enter sends it to the aside. Typing clears it. |
+| “Tell the agent …” in the aside | Sends a self-contained relay marked `aside ›`; the panel shows what was sent and whether the agent has read it. |
+| “Move this to its own window” in the aside | Opens a named Pi window beside the current tmux window, with the conversation and tools preserved. Outside tmux, copies or shows the resume command. |
 | Esc with the panel open | Closes the aside and cancels its work; the main agent keeps going. A second Esc within 500 ms is ignored. With no aside open, Esc keeps Pi's behavior. |
 | Swipe or wheel over the panel | Scrolls the aside. Outside it, Pi's scrolling. Requires fullscreen mode and a terminal that reports mouse events. |
 | Tap or click ✕ | Closes the panel or reader (fullscreen). |
@@ -81,8 +83,7 @@ with a 16.7K-token session, with every installed extension loaded:
 aside: exact · read 16,729 of 16,729 cacheable, wrote 190 · $0.004
 ```
 
-The cost appears only when it is news: `main cache had expired · $0.77`, or
-`rebuilt context · $0.71 · <reason>` when the fork could not be made exact.
+Usage stays in Pi’s totals; `/aside` opens a reader with cost and cache details. The panel has no cost footer.
 
 ## How it works
 
@@ -92,10 +93,12 @@ result extends P byte for byte (checks C1–C3), and sends it through Pi's model
 credentials. Any check that fails falls back to a rebuilt request, labelled `rebuilt`, which still works but does not
 read the cache.
 
-- Exact forks work for `anthropic-messages`, `openai-responses` and `openai-completions` over HTTP/SSE. Other APIs
-  and stateful transports use the rebuilt path.
-- The aside uses the session's callable tools, at most 24 rounds per question. Disabled tools stay disabled;
-  Pi's existing overrides, argument validation and tool hooks apply.
+- Exact forks require native mid-conversation tool additions to preserve the main tool declarations. Otherwise the
+  existing checks select the rebuilt path. Supported APIs are `anthropic-messages`, `openai-responses` and
+  `openai-completions` over HTTP/SSE. Other APIs and stateful transports use the rebuilt path.
+- The aside uses the session's callable tools, up to 24 rounds per question, then one summary request.
+  `/aside continue` starts fresh rounds. Its internal relay and move tools remain available even without main tools.
+  Disabled session tools stay disabled; Pi's existing overrides, argument validation and tool hooks apply.
 - Each aside request adds one usage entry to the session file once the agent is idle, so `/session` costs stay
   complete.
 
