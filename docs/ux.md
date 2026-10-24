@@ -1,11 +1,10 @@
 # pi-aside: interaction design
 
-Status: implemented, revision 8. The panel is a small window: Esc or its close mark closes it; a wheel or
-swipe over it scrolls it. Empty Enter and sending a message to the agent leave it alone. Side tasks can use the
-session's callable tools, through Pi's own validation and permission hooks (§3.9). Revision 7 introduced room,
-follow-ups and the reader; revision 6 introduced progress and Markdown; revision 5 moved routing to Pi's `input`
-event. This document describes the current behavior. The engine in `design.md` remains the cache-checked fork;
-implementation changes and departures are recorded in `implementation.md`. §7 records earlier design mistakes.
+Status: implemented, revision 9 (pi-aside 0.5.0). The panel is a small window with answers, a title and
+close mark. Only ongoing work adds a progress line. Direct requests relay findings to the main agent or move
+the conversation into its own Pi window. Optional next-step suggestions use the user's language and begin
+with `/aside` in the empty editor. Interface strings are English. The engine remains the cache-checked fork
+in `design.md`; Pi 1.3.0 limitations and implementation departures are in `implementation.md`.
 
 ## 1. The goal
 
@@ -131,40 +130,43 @@ question mark is a steer, exactly as today.
 - **Tools.** A dim activity line shows the current tool call. Finished shell, edit and write calls leave one
   concise step, such as `✓ $ du -sh ~/.cache` or `✓ write notes/feedback.md`; failures have `✗`. The steps also
   appear in the reader. Tools and their permission behavior are described in §3.9.
-- **No session branch.** The side exchange and its tool results remain in memory; nothing is added to `/tree`
-  or the main model context. The session file receives usage accounting when the agent is idle. Tools can still
+- **No session branch.** Unless explicitly relayed or promoted, the side exchange and its tool results remain
+  in memory; nothing is added to `/tree` or the main model context. The session file receives usage accounting when the agent is idle. Tools can still
   change shared files or external state, and session-bound extension tools can affect the main session: a side
   conversation is not an isolated filesystem or a sandbox. A session switch cancels the aside and discards it.
 
-### 3.3 Handing off is ghost text
+### 3.3 Next-step suggestions and direct relays
 
-Sometimes the answer shows that the agent should do something else. The handoff reuses what everyone already
-knows from shells and IDEs: dim suggested text that Tab accepts.
+An aside may end with one hidden last line `next: <what the user would say next>`. Usually there is none.
+It is one short sentence in the user's words and conversation language, only for an obvious next step.
+Code adds `/aside `, so Tab then Enter always sends it to the aside. For example: `/aside 清掉那两个可清的`.
+
+- Show the suggestion in gray only with an empty editor. Pi 1.3.0 uses the documented fallback: one dim line
+  flush with the editor, preserving other extensions' editor replacements. There is no acceptance symbol or instruction.
+- Tab fills the full `/aside …` text; Enter sends it. All other Tab behavior remains Pi's autocomplete.
+- Typing, closing the panel, a new aside question, or new main-agent output clears the suggestion. Deleting typed
+  text does not bring it back. Never display it over existing editor text or capture Tab in another dialog.
+- Sanitize to one trimmed line, at most 80 visible columns with an ellipsis; discard a suggestion beginning with `/`.
+
+When the user's latest message explicitly asks to tell/pass/relay something to the main agent, in any language,
+the aside calls its internal `tell_agent({message})` tool. It never sends on its own initiative. It may suggest
+asking for a relay through `next:`. The relay is self-contained because the main agent has not seen the aside.
+Relay requests stay `route: side`; the aside must never claim it cannot reach the agent.
+
+Delivery uses a displayed custom message with steer delivery and a triggered turn. While the agent runs, it
+reads the relay after its current step without aborting it. While idle, it starts a turn. The transcript prefix is
+`aside ›` (or `aside:<window-name> ›` from a promoted Pi). The model sees a user-side instruction explicitly
+relayed from the user's aside conversation. The panel shows the complete sent message:
 
 ```text
- │ ╰───────────────────────────────────────────────╯
- ├───────────────────────────────────────────────────┤
- │ █ switch to approach A (see side note)            │  ← dim ghost text in the empty editor
- └───────────────────────────────────────────────────┘
-      ⇥ accept
+→ to the agent
+┃ The user checked disk usage in an aside and asks you to clean the safe cache.
+It will see this after its current step.
 ```
 
-- The aside model is told in its notice to end with an optional one-line `handoff`, and only when the question
-  implies a change to the agent's work, or the user asks it to pass something on ("tell the agent what we
-  found"). Without a handoff line, no ghost text appears.
-- Relaying is the same gesture, not a second channel. A relay request is `route: side`: forwarding the words
-  verbatim would reach an agent that never saw the conversation. The aside writes the self-contained message in
-  its answer, which becomes the side note, and the handoff line points the agent at it. The aside cannot send
-  anything itself; the user's Tab and Enter decide whether and when the agent is interrupted.
-- **Tab** on an empty editor accepts the suggestion into the editor, using Pi's existing autocomplete meaning. The
-  user can edit it. **Enter** sends it with Pi's meaning: a steer while running, the next prompt while idle.
-- A sent handoff carries the side Q&A as a custom message next to it, so the agent gets the reasoning as well.
-  Nothing reaches the main session without the user's own Enter (A3).
-- Typing anything replaces the ghost text, as ghost text always works.
-
-This also covers a wrong guess. `isn't foo.ts generated?` is a correction phrased as a question. It goes to the
-side, gets an answer within seconds, and comes back as a sharper steer through Tab and Enter, with no lost text.
-Esc closes an open aside first; once it is closed and the 500 ms double-press guard has elapsed, Esc stops the agent.
+The last line becomes `It has read this.` when Pi injects the message into the main context. Idle delivery is
+read immediately. This is context consumption, not an acknowledgement of task completion. There is no handoff
+line, side-note-on-send path or accepted-handoff state. Relays are normal tool rounds for usage accounting.
 
 ### 3.4 The route check
 
@@ -198,20 +200,11 @@ The aside request itself answers the routing question, so no extra request is ne
 - No tool runs before an explicit `side` route; an `agent` route ends the aside before tools. Cancelling
   a request never forwards its partial route line. Esc follows the window behavior in §3.2.
 
-### 3.5 Money is shown only when it is news
+### 3.5 Usage stays in Pi
 
-| Engine outcome | What the user sees |
-|---|---|
-| T0, cache read (the normal case, about $0.03) | Nothing |
-| T0, cold cache, written, at or above $0.25 | One dim line: `main cache had expired · $0.77`. The write is **not** a prepayment today: Anthropic writes an entry only at a breakpoint, the aside's message breakpoint is after Q, and the main session's next request does not contain Q. A fork-point breakpoint (§5.5) would make it one |
-| T1 rebuilt, at or above $0.25 | One dim line in the panel: `rebuilt context · $0.71 · model changed since the last turn` |
-| Three T1 asides in a row in one session | One notice with the reason, once |
-
-- Cost already lives in Pi's footer. Every aside's usage entry feeds it (`design.md` §4.6), so the totals stay
-  true without new UI.
-- The tier, `read x of y` and the hash of P appear in the `/aside` reader's detail line and in the usage note. They
-  are for debugging, not for everyday use.
-- No confirmation dialogs. The expensive cases are rare and labelled after the fact.
+Pi's footer and session usage entries account for the aside. The panel has no cost, status or teaching footer.
+Only ongoing work adds a progress line. The `/aside` reader retains tier, cache-read, effort and cost details
+for inspection. Three rebuilt asides in succession still produce one notice with the reason, once per session.
 
 ### 3.6 Where "everything" hides
 
@@ -221,9 +214,11 @@ The aside request itself answers the routing question, so no extra request is ne
 | Ask while subagents run | The same `?`: waiting counts as busy (§3.1, §3.8) |
 | Ask when idle | `/aside …`, found through `/` completion |
 | Read, inspect disk space, or write a note | The session's callable tools (§3.9) |
-| Act on the answer | Ghost text, then Tab and Enter |
+| Act on the answer | `/aside …` suggestion, then Tab and Enter |
+| Tell the main agent | Explicitly ask the aside to relay it |
+| Move into a separate Pi | Explicitly ask to move out |
 | Requests about the main agent's work ending in `?` | The route check sends them to the agent |
-| Recover from a wrong guess | Same ghost text |
+| Recover from a wrong guess | Ask the aside to tell the main agent |
 | Read a long answer | The panel grows; ctrl+o on its count line opens the reader |
 | Scroll | Wheel or swipe over the panel or reader (fullscreen) |
 | Reread | `/aside` |
@@ -245,7 +240,7 @@ The aside request itself answers the routing question, so no extra request is ne
 | Click or tap on ✕ | Close the panel or reader | Fullscreen mouse input |
 | Click or tap on a count line | Open the reader | Fullscreen mouse input |
 | Typing in the reader | Closes it; the text goes on in the editor | Natural |
-| Tab | Autocomplete, also accepts the handoff ghost text in an empty editor | Pi |
+| Tab | Autocomplete, also fills `/aside …` from a suggestion in an empty editor | Pi |
 | ctrl+o | Show more: Pi's tool output; where printed in the panel, the whole aside | Pi, extended only where printed |
 
 ### 3.8 Waiting for subagents
@@ -275,25 +270,57 @@ without `?` still goes to the main agent; opening the panel does not capture Ent
 The model is told to leave the main agent's files and processes alone. This is guidance, not a lock: both agents
 share the workspace, and tools can have external effects. Closing stops further work and requests cancellation of
 an in-flight tool; it cannot undo a completed edit or delete. Tool failures are shown to the aside as failures,
-not as successful actions. At most 24 model/tool rounds run for one question.
+not as successful actions. MAX_TOOL_ROUNDS remains 24 per question. If response 24 still asks for tools,
+none of those calls run. Each receives `Not run: round limit reached. Summarize what is done and what is left,
+then stop.` One final request writes a summary with done ✓ and left …, then a hidden `next:` line. If absent,
+code suggests `continue`. `/aside continue` or `/aside 继续` is an ordinary follow-up with 24 fresh rounds.
+When much remains, suggest moving out instead. A new follow-up waits for an active aside tool to finish.
 
-## 4. Feasibility (Pi extension API, checked in `dist/core/extensions/types.d.ts`)
+### 3.10 Move into a separate Pi
+
+On the user's explicit request, the aside calls internal `move_out({name?, hint?})`. The model chooses 2–3 lowercase
+English words in kebab case and one placeholder sentence in the conversation language. There is no extra naming
+request. Invalid or missing values become `aside-N` and `tell the agent when you're done`.
+
+- Finish the current tool, then stop the thread. Show `moving to its own window…` during the move.
+- Write a normal Pi session in this cwd's normal session directory. Preserve the main branch at the initial aside
+  fork, then every aside question, answer, tool call and result as ordinary messages. Strip route/next protocol.
+  Set the session name to `aside:<name>`, discoverable with `pi -r`.
+- With `$TMUX` and `$TMUX_PANE`, insert a new window immediately after the originating pane's window, use the same
+  cwd, and select it. Resolve duplicate window names with `-2`, `-3`, etc. The window and session share the name.
+  Start `pi --session <file>` and continue work interrupted by promotion. Do not kill running tools.
+- Without tmux, copy `pi --session <file>` and show `Copied: pi --session … — paste it in any terminal.`
+  If clipboard copying fails, show the command without claiming it was copied. The exported thread is retired;
+  the next aside is fresh.
+- In the parent, close the moved panel and drop the thread. Append one display-only transcript entry
+  `↗ aside:<name> · window <index>`. It never enters model context or changes the main prompt cache. Clicking
+  it in fullscreen selects the child window.
+- The child receives parent inbox, name and hint through `PI_ASIDE_PARENT`, `PI_ASIDE_NAME`, `PI_ASIDE_HINT`.
+  Its empty-editor placeholder has no `/aside` prefix and disappears when the user types. It registers its own
+  main-agent `tell_agent` tool, restricted by its description to explicit user requests. Atomic JSON inbox files
+  carry self-contained relays back to the parent. The parent scans on start, watches changes, and removes consumed
+  files. Cross-process read status is not shown. The child is a normal independent Pi; its new usage is its own.
+
+
+## 4. Feasibility (Pi 1.3.0)
 
 | Need | API |
 |---|---|
-| The route check's fallback steer | `pi.sendUserMessage` with steer delivery, as in `design.md` §4.7 |
-| The waiting state (§3.1) | `pi.events` (`emit`, `on`; `dist/core/event-bus.d.ts`); one emitter in pi-durable-subagents |
-| Route a submitted text that ends in `?` while the agent runs | Pi's `input` event (`handled` or `continue`; `streamingBehavior` tells a steer from a follow-up), `ctx.isIdle()`. Implemented this way instead of intercepting the key, so a remapped submit key, bracketed paste and IME need no special handling |
-| Esc for the panel; Tab on an empty editor with a pending handoff; refreshing the hint | `ctx.ui.onTerminalInput` (returns `consume`), `getEditorText` |
-| The hint below the editor and the panel above it | `ctx.ui.setWidget(key, …, { placement })` |
-| Accept the handoff | `ctx.ui.setEditorText` |
-| Reader overlay | `ctx.ui.custom(…, { overlay: true })` |
-| Panel/reader wheel, close and more targets | Component `handleMouse` in Pi fullscreen mode |
-| The handoff's side note | `pi.sendMessage` (custom message), delivered with the user's message |
+| Submitted question routing | `input`, `ctx.isIdle()`, `pi.sendUserMessage` |
+| Existing tool validation/permissions | Private session executor bridge through `ctx.executeTool` |
+| Internal tools without main tools | Appended `SystemMessage.toolsAdded`; handled within the aside thread |
+| Direct relay | `pi.sendMessage`, `deliverAs: "steer"`, `triggerTurn: true`, `message_start` |
+| Transcript prefixes | `pi.registerMessageRenderer` |
+| Display-only window link | `pi.appendEntry`, `pi.registerEntryRenderer`; custom entries are excluded from context |
+| Editor hint and suggestion | `setWidget`; `onTerminalInput`, `getEditorText`, `setEditorText` for Tab |
+| Editor replacement investigation | `getEditorComponent` returns a factory; `setEditorComponent` replaces the active editor |
+| Session export/resume | Pi `SessionManager`, session version 3 |
+| tmux and clipboard | `pi.exec`, `copyToClipboard` |
+| Panel/reader touch | Component `handleMouse` in fullscreen; keyboard paths in regular mode |
 
-Ghost text drawn *inside* the editor would need `setEditorComponent`, which conflicts with other editor
-replacements. The implementation draws it as a dim `belowEditor` widget line, `⇥ <suggestion>  (tab accepts)`, shown
-only while the editor is empty.
+Pi has no placeholder API. The supported fallback avoids replacing or wrapping another extension's custom
+editor. Models without native mid-conversation tool additions conservatively use the existing rebuilt path;
+cache checks are unchanged. See `implementation.md` for evidence and limits.
 
 ## 5. Risks and how they are measured
 
@@ -301,7 +328,7 @@ only while the editor is empty.
    today. Measurement: the rate of `route: agent`, and a local sample of the texts for review. If it is high, the
    notice is tuned. No user harm beyond the status quo.
 2. **The route check says `side` for a request or a correction.** Its recovery is the
-   handoff (§3.3). Measurement: how often a `?` aside is followed within 30 s by a handoff or by a steer with
+   relay (§3.3). Measurement: how often a `?` aside is followed within 30 s by a relay or by a steer with
    similar text. If that happens in more than 15 % of asides over a week of real use, the rule becomes opt-in, and
    the hint offers the side instead (key decided then). A correction misrouted this way lets the agent keep going
    until the user hands off or closes the aside and then stops the agent. A steer does not stop the agent at once either, because it lands after
@@ -336,7 +363,7 @@ only while the editor is empty.
 | U2 | Esc closes an open panel, cancelling only the aside; a rapid second Esc does not stop the agent; a later Esc keeps Pi's behavior | Key replay |
 | U3 | The hint below the editor is present exactly when Enter will ask on the side | Snapshot plus key replay |
 | U4 | Normal-path screens contain no tier, cache, token or price text | Snapshot |
-| U5 | Nothing reaches the main session without the user's Enter; a handoff adds exactly one custom message | Capture server plus session file |
+| U5 | Only an explicit user relay request authorizes tell_agent; delivery adds one custom message | Capture server plus session file |
 | U6 | Paste, IME and a remapped submit key behave as without pi-aside | Key replay |
 | U7 | Misroute rates are logged locally (§5.1, §5.2) | Usage note field |
 | U8 | Route check: the 40-message set routes with no `side` error on a request or correction about the main task; an aside failure before the route line sends a steer | Fixture set against the capture server; injected failure |

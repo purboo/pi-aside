@@ -1,7 +1,7 @@
 # pi-aside: implementation notes
 
 Status: implemented against Pi 1.3.0. This document maps the code to [design.md](design.md) (engine, rev 11) and
-[ux.md](ux.md) (interaction, rev 8), lists where the implementation departs from them and why, and records how it was
+[ux.md](ux.md) (interaction, rev 9), lists where the implementation departs from them and why, and records how it was
 verified.
 
 ## 1. Map
@@ -13,12 +13,12 @@ verified.
 | `src/payload.ts` | design §4.2 | The per-API table (content list, trailing configuration items E, marker key), `strip()`, ΔH, and the checks C1, C2 and C3. |
 | `src/fork.ts` | design §4.2, §4.8 | Conversion under the frozen recipe (Pi's `convertToLlm` with image blocking, `normalizeContext`), the dry run B0 (onPayload records and aborts, nothing is sent), G with "still running" placeholders, the same-tick send with the currency check, F = B1 ⊕ ΔH, and T1 (fresh session id, SSE, no stored-response continuation). |
 | `src/transport.ts` | design §4.2 routing | Request options and attribution headers synthesized from the current settings, as Pi's next request would get them, never copied from the observation. |
-| `src/thread.ts` | design §4.4, §4.5; ux §3.2 | The side thread: the notice, up to 24 model/tool rounds, route-before-action guard, follow-ups, re-forking when the main session moved, accounting. |
+| `src/thread.ts` | design §4.4, §4.5; ux §3.2 | The side thread: the notice, 24 rounds followed by one summary request, route-before-action guard, follow-ups, re-forking when the main session moved, accounting. |
 | `src/tools.ts` | ux §3.9; new, amends design §4.4 | The private executor bridge, session tool validation and hooks, and projection of its hidden declaration. |
 | `src/usage.ts` | design §4.6 | Usage entries, appended only while the agent is idle; dropped and counted when a busy session is left. |
-| `src/qmark.ts`, `src/reply.ts` | ux §3.1, §3.3, §3.4 | The question-mark rule (U9) and the route and handoff lines. |
+| `src/qmark.ts`, `src/reply.ts` | ux §3.1, §3.3, §3.4 | The question-mark rule (U9) and the route and next lines. |
 | `src/busy.ts` | ux §3.1, §3.8 | The `background-work` convention on `pi.events`. |
-| `src/panel.ts` | ux §3.2, §3.3, §3.5 | The answer panel, the hint and ghost line, the money line, the `/aside` reader. |
+| `src/panel.ts` | ux §3.2, §3.3, §3.5 | The answer panel, the hint and placeholder line, the money line, the `/aside` reader. |
 | `src/index.ts` | all | Wiring: events, routing, the `/aside` command, widgets. |
 
 ## 2. Departures from the design
@@ -55,11 +55,15 @@ Returning `handled` takes the text; `continue` keeps Pi's meaning. This removes 
 `onTerminalInput` handles Tab acceptance, the panel's printed "more" key, Esc dismissal and refreshing the hint.
 Esc leaves an autocomplete list or an unrelated focused dialog alone.
 
-### 2.3 Ghost text is a dim line below the editor
+### 2.3 The empty-editor placeholder uses a flush dim line (0.5.0)
 
-Ghost text drawn inside the editor would need `setEditorComponent`, which conflicts with other editor extensions
-(the user's own setup replaces the editor frame). The suggestion is a dim line `⇥ <suggestion>  (tab accepts)` in a
-`belowEditor` widget. It shows only while the editor is empty, as ux §3.3 specifies for the ghost text.
+Pi 1.3.0 has no placeholder API. `getEditorComponent()` returns a configured factory, not the live editor.
+`setEditorComponent()` rebuilds the editor. Wrapping the current factory can preserve it initially but cannot
+compose with another extension that replaces it later; mutating its rendered lines would also assume its cursor,
+frame and autocomplete layout. The permitted fallback is one dim `belowEditor` line: `/aside <next-step>`.
+It has no `⇥` or acceptance instruction. Child windows use the same fallback without `/aside`. No editor factory
+is replaced. Tab is consumed only with empty text, a suggestion, and editor focus; other Tab goes through Pi.
+Typing, closing, a new question or main output clears the aside suggestion. Child hints clear when typed into.
 
 ### 2.4 The panel stays until closed
 
@@ -97,7 +101,7 @@ after 3.8 s at the main level and after 1.7–1.9 s at `low`; the cache read was
   dim and italic. Answers and the reader use Pi's Markdown component and theme.
 - Esc closes the panel and aborts the aside's controller, never the main agent. No folded line remains. A second
   Esc within 500 ms is consumed; after that interval it keeps Pi's normal meaning. Dialogs and autocomplete keep
-  their Esc. A request generation and thread/session ownership guards discard late route callbacks and handoffs
+  their Esc. A request generation and thread/session ownership guards discard late route callbacks and suggestions
   from cancelled or replaced work.
 - A close mark and count-line targets work through `handleMouse` in fullscreen mode. A wheel over the panel
   scrolls its own answer and is consumed even at its ends, so it cannot scroll the main conversation. The reader
@@ -154,9 +158,79 @@ paid results still count after cancellation or before a parent fails. No second 
 outcome. Tools must report `result.usage`; costs discarded by a throwing tool cannot be recovered. The stable
 bridge scope remains bounded even when Pi's nested recorder reaches its call limit or resets IDs.
 
+### 2.10 Relays and consumption (0.5.0)
+
+`src/thread.ts` adds `tell_agent` and `move_out` as appended `SystemMessage.toolsAdded` definitions. They are
+handled before the session executor, including in blank sessions and when the main has no tools. The notice
+restricts them to an explicit latest user request and requires self-contained relay text. There is no separate
+language-specific intent heuristic. The route-before-tool guard still covers both internal tools.
+
+`pi.sendMessage({customType: "aside", content, display: true, details}, {triggerTurn: true, deliverAs: "steer"})`
+uses Pi's native queue. Verified in `agent-session.js:sendCustomMessage`: streaming goes through `agent.steer`
+and idle delivery starts a custom-message run. It never aborts a tool. `message_start` for that custom message
+marks a queued relay consumed; idle delivery is immediately read. This reports entry into context, not model
+comprehension or completion. The shared relay object updates the panel's `→ to the agent` block and one plain
+status sentence. The message renderer displays `aside ›` or `aside:<name> ›`; content labels it as an instruction
+relayed from the user's aside. The handoff parser, accepted handoff and side-note-on-send path are removed.
+
+### 2.11 Native tool declarations and cache checks (Pi 1.3.0 limitation)
+
+The new tools must always be available to the aside and absent from the main agent's loadout. Their definitions
+therefore follow the frozen main prefix. Pi's provider adapters can preserve that prefix only when the model's
+compatibility supports native mid-conversation tool additions: Anthropic needs `supportsMidConvoSystemMessages`
+and `supportsMidConvoToolChanges` (and initial tools), Responses needs `supportsMidConvoSystemMessages` and
+`supportsAdditionalTools`, Completions needs `supportsMidConvoSystemMessages` and `supportsMidConvoToolAdditions`.
+These capabilities are read from Pi's model configuration; pi-aside never invents support for a provider.
+
+Otherwise Pi folds the definitions into top-level `tools`, which differs from P. Keeping exact cache reuse while
+also declaring these tools is technically impossible on that path. C1–C3 remain unchanged: they reject the changed
+payload and use the existing isolated `rebuilt` fallback. Usage and cache accounting are unchanged. Tests now
+explicitly configure native-capable fake models for exact-fork regressions, plus a legacy model that proves
+conservative fallback and retains both internal tools. This is a cache limitation, with the same user-visible design.
+
+### 2.12 Summary and promotion (0.5.0)
+
+Response 24's tool calls each receive the specified limit result without execution. Exactly one further model
+request writes a summary. A missing/invalid `next:` becomes `continue`. A follow-up has a fresh counter. If the
+summary request itself asks for tools, none run and no further request is made.
+
+`src/promotion.ts` writes a version-3 session using a fresh `SessionManager` header, the captured main branch
+at the initial fork (including compactions, context edits and metadata), then normal user/assistant/tool-result
+entries through `SessionManager.appendMessage`. Provider metadata and tool call IDs are preserved; aside notice,
+route and next protocol are excluded. Unanswered main tool calls at that snapshot receive the same still-running
+placeholder results as the fork, keeping the exported context valid. Names use `appendSessionInfo`. SessionManager
+round-trip and list tests verify resumability and discovery in the normal cwd session directory.
+
+An incoming follow-up waits for the current aside tool to finish, skips remaining calls and yields before another request; it never aborts that tool to move.
+`move_out` runs in sequence after earlier tools and stops further calls before exporting. Its unfinished model
+turn is resumed with `continue` in the child. tmux arguments target `$TMUX_PANE`, use `new-window -a` without `-d`,
+quote child environment/command arguments, and return the stable window ID and displayed index. Names are checked
+in that tmux session and suffixed on collision. The parent appends a custom **entry**, via `appendEntry` and
+`registerEntryRenderer`, rather than a custom message: Pi explicitly excludes custom entries from LLM context
+and emits `entry_appended` for immediate display. Fullscreen clicks select its stable window ID.
+
+Outside tmux the exported thread retires and the panel keeps the launch command. Pi's `copyToClipboard` is attempted;
+if it fails, the UI shows the command without the inaccurate `Copied:` claim. This is the closest permitted fallback.
+A failed tmux launch leaves the panel/thread available and the valid exported session on disk.
+
+The parent's inbox lives under `getAgentDir()/aside-inbox/<session-id>-<pid>`. `fs.watch` plus a startup scan reads
+atomic JSON writes; only successfully delivered files are removed, so delivery errors can retry. Invalid shapes are
+removed and reported. Watchers close on session replacement/shutdown. A child with `PI_ASIDE_PARENT` registers a
+normal main-agent `tell_agent` tool writing into that inbox. Its new model/tool usage belongs to its independent Pi.
+
+### 2.13 Panel touch boundary and bottom line (0.5.0)
+
+Close columns win on rows 0 and 1. Reader hit zones cover only visible count text, excluding the right half of
+the row. The literal row above the top frame is outside the widget: Pi cannot route that click to its
+`handleMouse`. The closest component-scoped behavior covers the close mark, horizontal neighboring cells and the
+row directly below; clicks outside the widget retain Pi's behavior. A regression explicitly checks this boundary.
+No cost line is appended to the completed panel. The reader retains accounting details and Pi retains totals.
+
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, 153 tests, about 45–50 s)
+### 3.1 Offline (`bun run check`, 169 tests)
+
+Final 0.5.0 check: TypeScript passed; **169 tests passed, 0 failed, 731 assertions**, across 7 files in 51.51 s.
 
 A local capture server speaks the three APIs as pi-ai consumes them. Real Pi 1.3.0 runs over RPC and, for the
 interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
@@ -169,7 +243,8 @@ interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 | Fallbacks | A handler that rewrites the transcript, which gives T1 with a fresh session id; no main request yet, which gives T1 with the session's system prompt. |
 | Order | A payload replacement by an extension loaded after pi-aside (the tap). Loading as an installed package. |
 | Follow-ups | The fork continues; after the main session moves, it forks again with the earlier exchange quoted. |
-| TUI | Busy `?` routing and hints, CJK punctuation, normal steers and idle prompts, Esc closing only the aside and guarding double presses, cancelling a running aside, Enter and agent sends leaving the panel open, handoff, route fallback, bracketed paste, background work, spinner/thinking, Markdown, long answers and ctrl+o, typing in the reader, panel wheel/touch targets, reader wheel and close, fresh versus follow-up threads, and route-before-tool behavior. |
+| TUI | Busy `?` routing and hints, CJK punctuation, normal steers and idle prompts, Esc closing only the aside and guarding double presses, cancelling a running aside, Enter and agent sends leaving the panel open, next-step suggestions, direct relay, route fallback, bracketed paste, background work, spinner/thinking, Markdown, long answers and ctrl+o, typing in the reader, panel wheel/touch targets, reader wheel and close, fresh versus follow-up threads, and route-before-tool behavior. |
+| 0.5.0 | Hidden/sanitized next suggestions and Tab to `/aside`; no-main-tools relay; queued-to-read TUI status; parent inbox and child main-agent relay; response-24 summary and fresh continuation; SessionManager round-trip, discovery, pending main tools and protocol stripping; safe tmux command/name construction; move waits for a tool and skips later calls; non-tmux command fallback; count text and expanded close touch zones. |
 | Effort | On models with mid-conversation effort, the aside's E carries `low` and everything else matches the main request (Anthropic and Responses); other models keep the main level. |
 | Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money, the panel room and count line, the claim on ctrl+o, the reader's keys. |
 
