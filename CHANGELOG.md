@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.4
+
+- No behavior change. Removed private provider names from the design notes.
+
 ## 0.5.3
 
 - Messages a moved-out window sent while the main Pi was not running now arrive as one message when the session

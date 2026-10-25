@@ -617,12 +617,12 @@ fixtures whose hook output cannot change: spy extensions, and pi-zip with no fol
 `@cluski/pi-by-the-way`, `@fractaal/pi-btw` (if its Pi fork is installable) and `pi-btw` 0.8.0. The capture server
 reports each package's longest common prefix with O, in tokens, and whether `metadata.user_id` matched.
 
-**Live (owner-approved, a few cents).** On relay Claude, run one main turn, then an aside, then a second main turn.
+**Live (owner-approved, a few cents).** On a relayed Claude provider, run one main turn, then an aside, then a second main turn.
 Pass:
 - the aside's `cacheRead` equals the first main response's cacheable prefix;
 - the second main turn's `cacheRead` is not lower than in a run without the aside.
 
-Repeat once on `gateway-gpt`.
+Repeat once on a GPT provider.
 
 ## 8. Risks and open points
 
@@ -658,7 +658,7 @@ Repeat once on `gateway-gpt`.
      the dispatcher decision it actually uses, exposes them to `onPayload`, or better to a final pre-dispatch hook,
      and uses nothing else. pi-aside would feature-detect it and compare.
 4. **Relay routing.** The same metadata as P, and the same auth and endpoint resolution as the main session's next
-   request. S3 measures it on relay.
+   request. S3 measures it on that relay.
 5. **Payload retention.** One observation holds P, T and B0, a few MB at most. It is never written to disk and is
    replaced on every main request.
 6. **Pi API drift.** Every hook used exists from Pi 0.86.1 to 1.3.0 (checked in installed builds):
