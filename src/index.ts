@@ -22,7 +22,7 @@ import {
 	renderBelow,
 	SPIN_MS,
 } from "./panel.ts";
-import { endsWithQuestionMark, routeEnter } from "./qmark.ts";
+import { canTakeBack, endsWithQuestionMark, routeEnter } from "./qmark.ts";
 import { parseReply } from "./reply.ts";
 import { AsideThread, type Relay, type TurnView } from "./thread.ts";
 import { installToolExecutor, projectAsideTools } from "./tools.ts";
@@ -42,6 +42,7 @@ const SIDE_NOTE_TYPE = "aside";
 const REBUILT_NOTICE_AFTER = 3;
 /** After Esc closes the panel, a second Esc this soon is a double press or a key repeat, not "stop the agent". */
 export const ESC_GUARD_MS = 500;
+const HISTORY_KEYS = ["tui.editor.cursorUp", "tui.editor.cursorDown", "tui.editor.historyPrevious", "tui.editor.historyNext"];
 
 /** Pi's Markdown component with Pi's Markdown theme; the last few renders are kept (the spinner redraws often). */
 function markdownRenderer(theme: Any): MarkdownRenderer {
@@ -81,6 +82,16 @@ export default function piAside(pi: ExtensionAPI): void {
 	/** Invalidates callbacks and completions from a stopped or replaced aside. */
 	let askSeq = 0;
 	let belowShown = false;
+	/**
+	 * The latest message the `?` rule took aside, until it goes to the agent, another aside starts or TAKE_BACK_MS after
+	 * its answer. Recalled from Pi's history and sent again (↑ ↵), or a tap on the panel's forward mark, sends it to the
+	 * agent instead (docs/ux.md §3.4.1).
+	 */
+	let retractable: { text: string; thread: AsideThread; turn: TurnView } | undefined;
+	/** The editor holds the retractable message, recalled from Pi's history, possibly edited since. */
+	let armed = false;
+	/** The editor's text before a history key (↑ ↓): the refresh after it sees whether the key recalled the message. */
+	let historyFrom: string | undefined;
 	let suggestion: string | undefined;
 	let childHint = process.env.PI_ASIDE_PARENT ? process.env.PI_ASIDE_HINT : undefined;
 	let inboxes: Inbox[] = [];
@@ -189,6 +200,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		closedAt = 0;
 		thread?.abort();
 		thread = undefined;
+		forgetRetractable();
 		panel = { turns: [] };
 		suggestion = undefined;
 		rebuiltInARow = 0;
@@ -203,6 +215,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		askSeq++;
 		const dropped = usage.flushOrDrop();
 		thread?.abort();
+		forgetRetractable();
 		if (dropped > 0) {
 			try {
 				ctxRef?.ui.setStatus(STATUS_KEY, `aside: ${dropped} usage ${dropped === 1 ? "entry" : "entries"} not recorded (session was busy)`);
@@ -248,6 +261,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	pi.on("session_tree", (_event, ctx) => {
 		askSeq++;
 		thread?.abort();
+		forgetRetractable();
 		ctxRef = ctx;
 		observer.reset();
 	});
@@ -272,6 +286,13 @@ export default function piAside(pi: ExtensionAPI): void {
 		// Anything the user sends retires the placeholders, even when typing and Enter arrived in one chunk.
 		childHint = undefined;
 		suggestion = undefined;
+		// The message the `?` rule took aside, sent again: this time it goes where Enter sends it without pi-aside.
+		const back = takesBack(event.text);
+		armed = false;
+		if (back) {
+			retract("history");
+			return continueToAgent(event.text);
+		}
 		refreshBelow();
 		if (event.images && event.images.length > 0) return continueToAgent(event.text);
 		const key = event.streamingBehavior === "followUp" ? "followUp" : "submit";
@@ -286,6 +307,77 @@ export default function piAside(pi: ExtensionAPI): void {
 		suggestion = undefined;
 		refreshBelow();
 		return { action: "continue" };
+	}
+
+	// ---------------------------------------------------------------- sending it to the agent instead (ux §3.4)
+
+	function forgetRetractable(): void {
+		retractable = undefined;
+		armed = false;
+	}
+
+	/** The retractable message, while it can still go to the agent instead. */
+	function retractableNow(): typeof retractable {
+		if (retractable && !canTakeBack(retractable.turn, Date.now())) forgetRetractable();
+		return retractable;
+	}
+
+	/**
+	 * Whether submitting `text` sends the retractable message to the agent: it was recalled from Pi's history, and maybe
+	 * edited since. Typing the same words again is not enough: a question asked again is usually a new side question.
+	 */
+	function takesBack(text: string): boolean {
+		const head = text.trim();
+		if (!armed || head === "" || head.startsWith("/") || head.startsWith("!")) return false;
+		return !!retractableNow();
+	}
+
+	/**
+	 * Note what the editor holds. A history key that brings the retractable message into the editor arms it; one that
+	 * brings in something else disarms it; edits keep it armed until the editor is empty again.
+	 */
+	function noteEditor(text: string): void {
+		const from = historyFrom;
+		historyFrom = undefined;
+		if (text.trim() === "") armed = false;
+		else if (from !== undefined && text !== from) {
+			const r = retractableNow();
+			armed = !!r && text.trim() === r.text.trim();
+		}
+	}
+
+	/**
+	 * The user sends the retractable message to the agent instead: the aside stops, what it said so far stays, and the
+	 * panel says where the message went. The caller sends the text (Pi's own path for an Enter). Returns the text.
+	 */
+	function retract(via: "history" | "mark"): string | undefined {
+		const r = retractableNow();
+		if (!r) return undefined;
+		forgetRetractable();
+		r.turn.retracted = true;
+		sentBack(r.text, via, r.turn.startedAt);
+		if (r.thread === thread) {
+			// Only this question's turn can be running: another aside would have replaced the retractable message.
+			if (!r.turn.done) r.thread.abort();
+			if (panel.turns === r.thread.turns && panel.turns.at(-1) === r.turn) {
+				panel.sentToAgent = { text: r.text, waiting: !running(), byUser: true };
+				suggestion = undefined;
+			}
+		}
+		renderNow();
+		setTimeout(refreshBelow, 0);
+		return r.text;
+	}
+
+	/** Each message sent to the agent instead is a misroute the user corrected (docs/ux.md §5.2): count it. */
+	function sentBack(question: string, via: "history" | "mark" | "forward", askedAt: number): void {
+		pi.events.emit("aside:sent-back", { question, via, afterMs: Date.now() - askedAt });
+	}
+
+	/** Whether the hint below an empty editor offers ↑ ↵: the retractable message is in the open panel, still answered. */
+	function undoable(): boolean {
+		const r = retractable;
+		return !!r && r.thread === thread && !panel.hidden && !panel.sentToAgent && panel.turns.at(-1) === r.turn && !r.turn.done;
 	}
 
 	function deliver(message: string, name = "aside"): Relay {
@@ -401,6 +493,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		pi.appendEntry("aside-window", { name: options.name, index, target });
 		askSeq++;
 		suggestion = undefined;
+		forgetRetractable();
 		thread = undefined;
 		panel = { turns: [], hidden: true };
 		showPanel(false); refreshBelow();
@@ -427,6 +520,10 @@ export default function piAside(pi: ExtensionAPI): void {
 			sessionId: () => ctxRef?.sessionManager.getSessionId() ?? "",
 			executeTool,
 			tellAgent: deliver,
+			forward: (text: string, askedAt: number) => {
+				sentBack(text, "forward", askedAt);
+				sendToAgent(text);
+			},
 			moveOut,
 			onUpdate: () => renderNow(),
 		};
@@ -447,6 +544,8 @@ export default function piAside(pi: ExtensionAPI): void {
 		const ctx = ctxRef;
 		if (!ctx) return undefined;
 		const seq = ++askSeq;
+		// Another aside starts: the message before it can no longer be taken back.
+		forgetRetractable();
 		if (!continues()) {
 			thread?.abort();
 			thread = new AsideThread(threadHost());
@@ -462,24 +561,32 @@ export default function piAside(pi: ExtensionAPI): void {
 		panel.sentToAgent = undefined;
 		panel.scrollTop = undefined;
 		showPanel(true);
-		refreshBelow();
 		const wasWaiting = waiting();
 		let routedToAgent = false;
-		const turn = await current.ask(question, {
+		let asked: TurnView | undefined;
+		const answer = current.ask(question, {
 			routeCheck: options.routeCheck,
 			onRoute: (route) => {
-				if (seq !== askSeq || current !== thread || panel.hidden || route !== "agent" || !options.routeCheck) return;
+				if (seq !== askSeq || current !== thread || panel.hidden || route !== "agent" || !options.routeCheck || asked?.retracted) return;
 				routedToAgent = true;
+				if (retractable?.turn === asked) forgetRetractable();
 				current.abort();
 				panel.sentToAgent = { text: question, waiting: wasWaiting };
 				sendToAgent(question);
 				renderNow();
+				refreshBelow();
 			},
 		});
+		// ask() adds the question's turn before its first await. Only the `?` rule's guess can be taken back.
+		asked = current.turns.at(-1);
+		if (options.routeCheck && asked) retractable = { text: question, thread: current, turn: asked };
+		refreshBelow();
+		const turn = await answer;
 		if (current !== thread || seq !== askSeq) return turn;
 		const parsed = parseReply(turn.raw, true);
-		if (options.routeCheck && !routedToAgent && !turn.aborted && turn.error && !parseReply(turn.raw, false).route) {
+		if (options.routeCheck && !routedToAgent && !turn.retracted && !turn.aborted && turn.error && !parseReply(turn.raw, false).route) {
 			// The aside failed before its route line: the text keeps Pi's meaning.
+			if (retractable?.turn === turn) forgetRetractable();
 			panel.sentToAgent = { text: question, waiting: wasWaiting };
 			sendToAgent(question);
 		} else if (!routedToAgent && parsed.next && !turn.error && !turn.aborted) {
@@ -580,8 +687,10 @@ export default function piAside(pi: ExtensionAPI): void {
 			const parsed = parseReply(turn.raw, turn.done);
 			let answer = parsed.body;
 			if (turn.error) answer += `${answer ? "\n\n" : ""}aside failed: ${turn.error}`;
-			if (turn.aborted) answer += `${answer ? "\n\n" : ""}(stopped)`;
+			if (turn.retracted) answer += `${answer ? "\n\n" : ""}↪ sent to the agent`;
+			else if (turn.aborted) answer += `${answer ? "\n\n" : ""}(stopped)`;
 			for (const relay of turn.relays ?? []) answer += `\n\n→ to the agent\n${relay.message}\n${relay.read ? "It has read this." : "It will see this after its current step."}`;
+			if (turn.forwarded !== undefined) answer += `\n\n↪ sent to the agent\n${turn.forwarded}`;
 			const steps = turn.steps.map((step) => `${step.ok ? "✓" : "✗"} ${step.label}`);
 			const hash = thread?.fork?.pHash ? ` · p ${thread.fork.pHash.slice(0, 12)}` : "";
 			return { question: turn.question, answer, detail: `${detail(turn)}${hash}`, steps };
@@ -701,13 +810,16 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 		if (event.button !== "left" || (event.type !== "press" && event.type !== "click")) return undefined;
 		const hit = panelHit(panelLast, event.width, event.x, event.y, !!panel.mouse);
-		const onClose = hit === "close";
-		const onMore = hit === "reader";
-		if (!onClose && !onMore) return undefined;
+		if (hit === undefined) return undefined;
 		// The press makes the panel the target of the click that follows on the same cell.
 		if (event.type === "click") {
-			if (onClose) closePanel();
-			else if (ctxRef) void openReader(ctxRef);
+			if (hit === "close") closePanel();
+			else if (hit === "forward") {
+				const text = retract("mark");
+				// Too late: the mark goes away.
+				if (text !== undefined) sendToAgent(text);
+				else renderNow();
+			} else if (ctxRef) void openReader(ctxRef);
 		}
 		return { handled: true };
 	}
@@ -740,6 +852,8 @@ export default function piAside(pi: ExtensionAPI): void {
 							}
 							// Pi reports the mouse in its fullscreen mode, whose renderer scrolls its own viewport.
 							panel.mouse = typeof tui?.scrollBy === "function";
+							const r = retractableNow();
+							panel.forwardable = !!r && r.thread === thread && panel.turns.at(-1) === r.turn;
 							const view = panelView(panel, width, theme, md, Date.now());
 							panelLast = view;
 							panelMore = view.more;
@@ -765,8 +879,11 @@ export default function piAside(pi: ExtensionAPI): void {
 		} catch {
 			text = "";
 		}
-		const side = routeEnter({ text, busy: busy(), key: "submit" }) === "side" && endsWithQuestionMark(text);
-		const hint: HintKind = side ? (continues() ? "follow" : "ask") : undefined;
+		noteEditor(text);
+		const back = takesBack(text);
+		const side = !back && routeEnter({ text, busy: busy(), key: "submit" }) === "side" && endsWithQuestionMark(text);
+		let hint: HintKind = back ? "back" : side ? (continues() ? "follow" : "ask") : undefined;
+		if (text === "" && undoable()) hint = "undo";
 		if (text !== "") { suggestion = undefined; childHint = undefined; }
 		const next = text === "" ? suggestion : undefined;
 		return { hint, next };
@@ -806,6 +923,25 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (typeof focus !== "function") return true;
 		const focused = focus.call(tuiRef);
 		return !!focused && typeof focused === "object" && focused.actionHandlers instanceof Map;
+	}
+
+	function editorText(): string {
+		try {
+			return ctxRef?.ui.getEditorText() ?? "";
+		} catch {
+			return "";
+		}
+	}
+
+	/** Pi's keys that browse its prompt history (↑ ↓ at the top or bottom of the editor, or the dedicated actions). */
+	function isHistoryKey(kb: Any, data: string): boolean {
+		return HISTORY_KEYS.some((id) => {
+			try {
+				return kb.matches(data, id) === true;
+			} catch {
+				return false;
+			}
+		});
 	}
 
 	/** Whether the editor shows its autocomplete list, which Esc closes first. */
@@ -859,6 +995,8 @@ export default function piAside(pi: ExtensionAPI): void {
 					return { consume: true };
 				}
 			}
+			// ↑ ↓ may bring a message back from Pi's history: compare the editor's text before and after the key.
+			if (retractable && editorFocused() && isHistoryKey(kb, data)) historyFrom = editorText();
 			// The editor applies the key after this listener: look at its text afterwards.
 			setTimeout(refreshBelow, 0);
 			return undefined;

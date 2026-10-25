@@ -592,4 +592,169 @@ describe("TUI", () => {
 		expect(last).toContain("is it slow?");
 		expect(last).not.toContain("<aside>");
 	}, 60_000);
+
+	// ux §3.4.1: what the `?` rule took aside goes to the agent instead, as the user's own words.
+	const isAside = (r: { body: unknown }) => JSON.stringify(r.body).includes("<aside>");
+	const mainRequests = (s: CaptureServer) => s.requests.filter((r) => !isAside(r));
+
+	test("↑ ↵ while the aside answers: the hint offers it, the aside stops, the agent gets the text as a steer", async () => {
+		const { server, tui } = await start();
+		server.enqueue(
+			{ toolCalls: [{ id: "toolu_u1", name: "bash", arguments: { command: "sleep 3; echo ok" } }], usage: { input: 50, cacheWrite: 900 } },
+			{ text: "Keeping the tests.", usage: { input: 50, cacheRead: 900 } },
+		);
+		tui.type("delete the old tests");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		const hold = deferred();
+		server.respond((r) => (isAside(r) ? { text: "route: side\nThey cover the old API.", hold: hold.promise, usage: { input: 10, cacheRead: 900 } } : undefined));
+		tui.type("why are you deleting the tests?");
+		await tui.waitForScreen(/↵ asks on the side/);
+		tui.key("Enter");
+		await tui.waitForScreen(/↑↵ sends it to the agent instead/);
+		tui.key("Up");
+		await tui.waitForScreen(/↵ sends to the agent · it was asked on the side/);
+		tui.key("Enter");
+		const sent = await tui.waitForScreen(/↪ sent to the agent/);
+		expect(sent).not.toMatch(/it reads as/);
+		expect(sent).not.toMatch(/sends it to the agent instead/);
+		hold.resolve();
+		await tui.waitForScreen(/Keeping the tests\./, 20_000);
+		await sleep(300);
+		const main = mainRequests(server);
+		expect(main).toHaveLength(2);
+		const steer = JSON.stringify(main[1]!.body);
+		expect(steer).toContain("why are you deleting the tests?");
+		expect(steer).toContain("echo ok");
+		// The aside stopped: its held answer never reached the panel, and nothing asked it again.
+		expect(tui.screen()).not.toMatch(/They cover the old API\./);
+		expect(server.requests.filter(isAside)).toHaveLength(1);
+	}, 60_000);
+
+	test("recalled after Esc closed the panel and edited, it still goes to the agent, once", async () => {
+		const { server, tui } = await start();
+		server.enqueue(
+			{ toolCalls: [{ id: "toolu_u2", name: "bash", arguments: { command: "sleep 4; echo ok" } }], usage: { input: 50, cacheWrite: 900 } },
+			{ text: "Switching to A.", usage: { input: 50, cacheRead: 900 } },
+		);
+		tui.type("refactor the parser");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		server.respond((r) => (isAside(r) ? { text: "route: side\nBecause B touches fewer callers.", usage: { input: 10, cacheRead: 900 } } : undefined));
+		tui.type("why did you pick B?");
+		tui.key("Enter");
+		await tui.waitForScreen(/Because B touches fewer callers\./);
+		// Done: the hint has given way, but the message can still go.
+		expect(tui.screen()).not.toMatch(/sends it to the agent instead/);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /Because B touches/.test(tui.screen()); i++) await sleep(100);
+		tui.key("Up");
+		await tui.waitForScreen(/↵ sends to the agent · it was asked on the side/);
+		tui.key("End");
+		tui.type(" Use A instead?");
+		await sleep(300);
+		expect(tui.screen()).toMatch(/↵ sends to the agent · it was asked on the side/);
+		tui.key("Enter");
+		await tui.waitForScreen(/Switching to A\./, 20_000);
+		const main = mainRequests(server);
+		expect(main).toHaveLength(2);
+		expect(JSON.stringify(main[1]!.body)).toContain("why did you pick B? Use A instead?");
+		expect(tui.screen()).not.toMatch(/Because B touches/);
+		// Sent once: recalled again, it is an ordinary message.
+		tui.key("Up");
+		await sleep(300);
+		expect(tui.screen()).toMatch(/Use A instead\?/);
+		expect(tui.screen()).not.toMatch(/it was asked on the side/);
+	}, 60_000);
+
+	test("typing the same question again asks on the side again: only a message recalled from history goes back", async () => {
+		const { server, tui } = await start();
+		server.enqueue({ toolCalls: [{ id: "toolu_u5", name: "bash", arguments: { command: "sleep 40; echo ok" } }], usage: { input: 50, cacheWrite: 900 } });
+		tui.type("run the long job");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		let side = 0;
+		server.respond((r) => (isAside(r) ? { text: `route: side\nAbout ${++side === 1 ? "half" : "two thirds"} done.`, usage: { input: 10, cacheRead: 900 } } : undefined));
+		tui.type("how far along is it?");
+		tui.key("Enter");
+		await tui.waitForScreen(/About half done\./);
+		tui.type("how far along is it?");
+		await tui.waitForScreen(/↵ follows up on the side/);
+		expect(tui.screen()).not.toMatch(/it was asked on the side/);
+		tui.key("Enter");
+		await tui.waitForScreen(/About two thirds done\./);
+		expect(server.requests.filter(isAside)).toHaveLength(2);
+		expect(mainRequests(server)).toHaveLength(1);
+		// Browsing past it in the history does not take it back either.
+		tui.key("Up");
+		await tui.waitForScreen(/it was asked on the side/);
+		tui.key("Up");
+		await sleep(300);
+		expect(tui.screen()).not.toMatch(/it was asked on the side/);
+		tui.key("C-u");
+	}, 60_000);
+
+	test("fullscreen: a tap on ↪ in the panel's title sends the question to the agent", async () => {
+		const { server, tui } = await start();
+		server.enqueue(
+			{ toolCalls: [{ id: "toolu_u3", name: "bash", arguments: { command: "sleep 3; echo ok" } }], usage: { input: 50, cacheWrite: 900 } },
+			{ text: "Stopping now.", usage: { input: 50, cacheRead: 900 } },
+		);
+		tui.type("clean up the build");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		server.respond((r) => (isAside(r) ? { text: "route: side\nIt removes dist/ only.", usage: { input: 10, cacheRead: 900 } } : undefined));
+		tui.type("is it safe to remove dist?");
+		tui.key("Enter");
+		const screen = await tui.waitForScreen(/It removes dist\/ only\./);
+		const rows = screen.split("\n");
+		const row = rows.findIndex((line) => line.includes("╭─ is it safe to remove dist?"));
+		expect(row).toBeGreaterThanOrEqual(0);
+		const col = [...rows[row]!].indexOf("↪") + 1;
+		expect(col).toBeGreaterThan(0);
+		tui.type(`\x1b[<0;${col};${row + 1}M`);
+		tui.type(`\x1b[<0;${col};${row + 1}m`);
+		const sent = await tui.waitForScreen(/↪ sent to the agent/);
+		expect(sent).toMatch(/It removes dist\/ only\./);
+		expect(sent.split("\n").find((line) => line.includes("╭─ is it safe"))).not.toContain("↪");
+		await tui.waitForScreen(/Stopping now\./, 20_000);
+		const main = mainRequests(server);
+		expect(main).toHaveLength(2);
+		expect(JSON.stringify(main[1]!.body)).toContain("is it safe to remove dist?");
+	}, 60_000);
+
+	test("forward: sends the previous question to the agent word for word, as the user's own message", async () => {
+		const { server, tui } = await start();
+		server.enqueue(
+			{ toolCalls: [{ id: "toolu_u4", name: "bash", arguments: { command: "sleep 4; echo ok" } }], usage: { input: 50, cacheWrite: 900 } },
+			{ text: "Not deleting them.", usage: { input: 50, cacheRead: 900 } },
+		);
+		tui.type("delete the old tests");
+		tui.key("Enter");
+		await server.waitForRequests(1);
+		await sleep(400);
+		let side = 0;
+		server.respond((r) => (isAside(r) ? (++side === 1 ? { text: "route: side\nThey cover the old API." } : { text: "route: side\nSent it.\nforward:" }) : undefined));
+		tui.type("why are you deleting the tests?");
+		tui.key("Enter");
+		await tui.waitForScreen(/They cover the old API\./);
+		tui.type("send that to the agent as it is?");
+		await tui.waitForScreen(/↵ follows up on the side/);
+		tui.key("Enter");
+		const screen = await tui.waitForScreen(/┃ why are you deleting the tests\?/);
+		expect(screen).toMatch(/↪ sent to the agent/);
+		expect(screen).toMatch(/Sent it\./);
+		expect(screen).not.toMatch(/forward:/);
+		await tui.waitForScreen(/Not deleting them\./, 20_000);
+		const main = mainRequests(server);
+		expect(main).toHaveLength(2);
+		const steer = JSON.stringify(main[1]!.body);
+		expect(steer).toContain("why are you deleting the tests?");
+		expect(steer).not.toContain("send that to the agent");
+		expect(steer).not.toContain("Relayed from");
+	}, 60_000);
 });

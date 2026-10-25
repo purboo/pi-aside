@@ -2,7 +2,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 
 // Parsing of the aside model's reply (docs/ux.md §3.3, §3.4): a hidden first line `route: side|agent`, the
 // visible body, and optional hidden last lines: `next: <what the user would say next>`, `tell: <message for the main
-// agent>` and `move: <name> | <hint>`. Actions are text, not tools: declaring tools in the fork would change the
+// agent>`, `forward:` (send the user's previous message on unchanged) and `move: <name> | <hint>`. Actions are text, not tools: declaring tools in the fork would change the
 // request's tool list on providers without inline tool additions, and the main session's cache would not apply.
 
 export type Route = "side" | "agent";
@@ -15,11 +15,13 @@ export interface ParsedReply {
 	tell?: string;
 	/** A complete reply's `move:` line: move this aside to its own window. */
 	move?: { name?: string; hint?: string };
+	/** A complete reply's `forward:` line: send the user's previous message in this thread to the agent, verbatim. */
+	forward?: boolean;
 }
 
 const ROUTE_LINE = /^route\s*:\s*(side|agent)$/i;
-const ACTION_LINE = /^\s*[*`]*(next|tell|move)[*`]*\s*:(.*)$/i;
-const ACTION_FORMS = ["next:", "tell:", "move:"];
+const ACTION_LINE = /^\s*[*`]*(next|tell|move|forward)[*`]*\s*:(.*)$/i;
+const ACTION_FORMS = ["next:", "tell:", "move:", "forward:"];
 const ROUTE_FORMS = ["route: side", "route: agent", "route : side", "route : agent", "route:side", "route:agent"];
 
 function cleanLine(line: string): string {
@@ -82,6 +84,7 @@ export function parseReply(raw: string, done: boolean): ParsedReply {
 		const kind = match[1]!.toLowerCase();
 		if (kind === "next") parsed.next ??= sanitizeSuggestion(value);
 		else if (kind === "tell") { if (value && parsed.tell === undefined) parsed.tell = value; }
+		else if (kind === "forward") parsed.forward = true;
 		else if (parsed.move === undefined) {
 			const bar = value.indexOf("|");
 			const name = (bar < 0 ? value : value.slice(0, bar)).trim();

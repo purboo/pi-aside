@@ -37,6 +37,18 @@ export function endsWithQuestionMark(text: string): boolean {
 	return QUESTION_MARKS.has(last);
 }
 
+/**
+ * How long after its answer ends a message the rule took aside can still be sent to the agent instead (docs/ux.md
+ * §3.4.1). A misroute shows when the panel opens or while the answer is read; a question asked again minutes later
+ * is a new side question, not a correction.
+ */
+export const TAKE_BACK_MS = 120_000;
+
+/** Whether the message of this turn can still go to the agent instead: while it is answered, and for TAKE_BACK_MS after. */
+export function canTakeBack(turn: { done: boolean; endedAt?: number }, now: number): boolean {
+	return !turn.done || turn.endedAt === undefined || now - turn.endedAt <= TAKE_BACK_MS;
+}
+
 export type EnterKey = "submit" | "followUp";
 
 /** Where a submitted editor text goes: "side" asks on the side, "pi" keeps Pi's meaning. */

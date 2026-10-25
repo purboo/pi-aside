@@ -22,7 +22,8 @@ The answer appears above the editor while the agent keeps going:
 ```
 
 The exchange stays on the side. Ask the aside to “tell the agent …” when you want it to relay a self-contained
-message, or “move this to its own window” to continue in a separate Pi.
+message, or “move this to its own window” to continue in a separate Pi. If the message was meant for the agent, press ↑
+and Enter: it goes to the agent as you wrote it.
 
 ## Install
 
@@ -50,6 +51,9 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | `/aside` | Opens the latest side conversation in the reader, at the latest question. Esc closes it. |
 | Tab on an empty editor with a gray `/aside …` suggestion | Fills the suggestion; Enter sends it to the aside. Typing clears it. |
 | “Tell the agent …” in the aside | Sends a self-contained relay marked `aside ›`; the panel shows what was sent and whether the agent has read it. |
+| ↑ then Enter after a `?` message went to the side | Sends it to the agent instead, as you wrote it, as if pi-aside had not taken it; the aside stops and keeps what it said. While the aside answers, an empty editor shows `↑↵ sends it to the agent instead`. Works until another aside starts or two minutes after the answer. Typing the same question again still asks on the side. |
+| Tap or click ↪ beside ✕ | The same, in fullscreen. |
+| “Send that to the agent as it is” in the aside | Sends your previous message unchanged, as your own message. |
 | “Move this to its own window” in the aside | Opens a named Pi window beside the current tmux window, with the conversation and tools preserved. Outside tmux, copies or shows the resume command. |
 | Esc with the panel open | Closes the aside and cancels its work; the main agent keeps going. A second Esc within 500 ms is ignored. With no aside open, Esc keeps Pi's behavior. |
 | Swipe or wheel over the panel | Scrolls the aside. Outside it, Pi's scrolling. Requires fullscreen mode and a terminal that reports mouse events. |
@@ -67,7 +71,8 @@ A question mark does not always make a message a question: `can you also add tes
 current task. The aside model starts its reply with a hidden route line. Independent tasks stay on the side;
 when the message is about changing the main agent's current work, pi-aside sends your
 original text as a steer, which is what Enter would have done without it, and says so:
-`↪ sent to the agent · it reads as a correction`.
+`↪ sent to the agent · it reads as a correction`. When it guesses wrong, or you wanted the agent itself to
+answer, ↑ ↵ sends your message on ([ux.md §3.4.1](docs/ux.md#341-sending-it-to-the-agent-instead)).
 
 "Running" also covers waiting for background work: when an extension reports pending work (for example, subagents
 whose reports will wake the agent), a `?` message asks on the side instead of starting a turn. See

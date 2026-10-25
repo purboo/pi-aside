@@ -28,6 +28,7 @@ export function notice(options: { routeCheck: boolean }): string {
 	lines.push(
 		"Your reply may end with hidden action lines, each on its own line after the visible text. The user does not see them; the side conversation acts on them when your reply ends. They are not tools: never call a tool for them.",
 		"`tell: <message>` relays one self-contained line to the main agent. Write it ONLY when the user's latest message explicitly asks you to tell/pass/relay something to the main agent, in any language. Never on your own initiative. The main agent never saw this aside conversation, so include what it needs. This line is how you reach the agent: never claim you cannot. The user sees the delivery status, so a brief confirmation in the visible text is enough.",
+		"`forward:` (nothing after the colon) sends the user's previous message in this side conversation to the main agent exactly as they wrote it, as their own message. Write it ONLY when the user's latest message asks to send that earlier message itself to the agent unchanged (for example \"send that to the agent as it is\"), usually because it was meant for the agent. To pass on findings or a reworded message, use `tell:` instead.",
 		"`move: <name> | <hint>` moves this aside to its own Pi window. Write it ONLY on an explicit request to move this aside out. name is 2–3 lowercase English words in kebab case; hint is one short placeholder sentence in the same language as the user's messages here, such as \"tell the agent when you're done\" for English. Do not make a separate naming request. Unfinished tool work continues in the new window.",
 		"`next: <what the user would say next>` only when there is an obvious next step; usually omit it. One short sentence, in the user's words and conversation language. Never add the /aside prefix. You may suggest telling the agent, but do not send without an explicit request.",
 		"After a round-limit tool result, summarize done ✓ and left …, then stop with a next: line suggesting continuation. If much work remains, suggest moving this to its own window instead.",
@@ -53,11 +54,17 @@ export interface TurnView {
 	/** Finished calls of tools that may change something, in order. */
 	steps: Step[];
 	relays?: Relay[];
+	/** The earlier question this turn's `forward:` line sent to the agent, verbatim. */
+	forwarded?: string;
+	/** The user sent this question to the agent instead (↑ ↵ or the panel's ↪): nothing more of this turn acts. */
+	retracted?: boolean;
 	/** The model's (summarized) thinking in the current request, while no answer text has arrived. */
 	thinking?: string;
 	/** When the question was asked, and when the answer's first text arrived (ms since the epoch). */
 	startedAt: number;
 	firstTextAt?: number;
+	/** When the answer completed, failed or stopped. */
+	endedAt?: number;
 	/** The thinking level the aside used, when lower than the main session's. */
 	effort?: string;
 	tier?: Tier;
@@ -81,6 +88,8 @@ export interface ThreadHost {
 	/** Execute through the main session's validation and permission hooks; unavailable means fail closed. */
 	executeTool?: ToolExecutor;
 	tellAgent?: (message: string) => Relay;
+	/** Send a question of this thread to the agent as the user's own message, with Pi's meaning. */
+	forward?: (text: string, askedAt: number) => void;
 	moveOut?: (thread: AsideThread, args: { name?: string; hint?: string }, signal: AbortSignal) => Promise<void>;
 	onUpdate: () => void;
 }
@@ -370,6 +379,7 @@ export class AsideThread {
 			}
 		} finally {
 			turn.done = true;
+			turn.endedAt = Date.now();
 			turn.activity = undefined;
 			turn.thinking = undefined;
 			if (this.controller === controller) {
@@ -382,9 +392,21 @@ export class AsideThread {
 		return turn;
 	}
 
-	/** Carry out a reply's action lines: relay at once (one relay per turn), and move out after its tool calls are skipped. */
+	/**
+	 * Carry out a reply's action lines: relay at once (one relay per turn), forward the previous question once, and
+	 * move out after its tool calls are skipped.
+	 */
 	private act(parsed: ParsedReply, turn: TurnView): void {
 		if (parsed.tell && !turn.relays?.length && this.host.tellAgent) (turn.relays ??= []).push(this.host.tellAgent(parsed.tell));
+		if (parsed.forward && turn.forwarded === undefined && this.host.forward) {
+			// The previous question, unless it was itself a forward request (whose own previous one went already) or the
+			// user already sent it to the agent.
+			const earlier = this.turns[this.turns.indexOf(turn) - 1];
+			if (earlier && earlier.forwarded === undefined && !earlier.retracted) {
+				turn.forwarded = earlier.question;
+				this.host.forward(earlier.question, earlier.startedAt);
+			}
+		}
 		if (parsed.move && this.host.moveOut && !this.promotion) this.promotion = parsed.move;
 	}
 

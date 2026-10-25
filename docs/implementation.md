@@ -1,7 +1,7 @@
 # pi-aside: implementation notes
 
 Status: implemented against Pi 1.4.0. This document maps the code to [design.md](design.md) (engine, rev 11) and
-[ux.md](ux.md) (interaction, rev 9), lists where the implementation departs from them and why, and records how it was
+[ux.md](ux.md) (interaction, rev 10), lists where the implementation departs from them and why, and records how it was
 verified.
 
 ## 1. Map
@@ -16,7 +16,7 @@ verified.
 | `src/thread.ts` | design §4.4, §4.5; ux §3.2 | The side thread: the notice, 24 rounds followed by one summary request, route-before-action guard, follow-ups, re-forking when the main session moved, accounting. |
 | `src/tools.ts` | ux §3.9; new, amends design §4.4 | The private executor bridge, session tool validation and hooks, and projection of its hidden declaration. |
 | `src/usage.ts` | design §4.6 | Usage entries, appended only while the agent is idle; dropped and counted when a busy session is left. |
-| `src/qmark.ts`, `src/reply.ts` | ux §3.1, §3.3, §3.4 | The question-mark rule (U9) and the route and next lines. |
+| `src/qmark.ts`, `src/reply.ts` | ux §3.1, §3.3, §3.4 | The question-mark rule (U9), its take-back window (ux §3.4.1), and the route, next and action lines. |
 | `src/busy.ts` | ux §3.1, §3.8 | The `background-work` convention on `pi.events`. |
 | `src/panel.ts` | ux §3.2, §3.3, §3.5 | The answer panel, the hint and placeholder line, the money line, the `/aside` reader. |
 | `src/index.ts` | all | Wiring: events, routing, the `/aside` command, widgets. |
@@ -52,7 +52,8 @@ Returning `handled` takes the text; `continue` keeps Pi's meaning. This removes 
 - IME composition is irrelevant, because only committed, submitted text is seen.
 - Submit routing sees complete committed text rather than raw key sequences.
 
-`onTerminalInput` handles Tab acceptance, the panel's printed "more" key, Esc dismissal and refreshing the hint.
+`onTerminalInput` handles Tab acceptance, the panel's printed "more" key, Esc dismissal, the history keys that may
+recall a message the `?` rule took aside (§2.14), and refreshing the hint.
 Esc leaves an autocomplete list or an unrelated focused dialog alone.
 
 ### 2.3 The empty-editor placeholder uses a flush dim line (0.5.0)
@@ -243,11 +244,42 @@ the row. The literal row above the top frame is outside the widget: Pi cannot ro
 row directly below; clicks outside the widget retain Pi's behavior. A regression explicitly checks this boundary.
 No cost line is appended to the completed panel. The reader retains accounting details and Pi retains totals.
 
+### 2.14 Sending it to the agent instead (0.6.0)
+
+ux §3.4.1. `src/index.ts` keeps the latest message the `?` rule took aside (`retractable`). It is set right after
+`ask()` adds the turn (synchronously, before its first await) and cleared when another aside starts, the session
+changes or moves in the tree, a move-out happens, the route check or its failure fallback sends the text, or
+`TAKE_BACK_MS` (`src/qmark.ts`) after the turn's `endedAt`.
+
+Pi 1.4 adds a submitted message to the editor's prompt history before it calls `session.prompt`, on the streaming
+path and on the idle path that the waiting state uses (`interactive-mode.js`, `addToHistory`), so ↑ recalls a
+message even when pi-aside handled it. `onTerminalInput` records the editor's text before a history key
+(`tui.editor.cursorUp`, `cursorDown`, `historyPrevious`, `historyNext`). The refresh after the key arms the take-back
+when the key brought exactly that message in, and disarms it when the key brought in something else. A key that only
+moves the cursor leaves the text unchanged and the state as it was. Edits keep it armed until the editor is empty.
+Typing the same words never arms it: a repeated status question stays a side question.
+
+The `input` handler checks the armed state first, marks the turn `retracted`, aborts it and returns `continue`, so
+the text takes Pi's own path: a steer while streaming, a prompt otherwise, a follow-up on Alt+Enter, images included.
+A tap on ↪ uses `sendToAgent` (`pi.sendUserMessage`, the route check's steer or prompt choice). `retracted` makes a
+late route callback and the failure fallback ignore the turn, so a message is never sent twice. The panel keeps the
+turn's text and replaces its progress, `stopped` or error line with `↪ sent to the agent`; the forward mark sits at
+column width − 9, with two edge cells before the close mark, and has its own hit zone.
+
+`forward:` is a hidden reply line, parsed like `tell:` and acted on when a response ends, under `route: side` when a
+route is required. It sends the previous turn's question once through `sendToAgent`, and never a turn that itself
+forwarded or was retracted. A model's text after the colon is ignored: the user's own words go. Promotion keeps it
+as a bracketed note.
+
+Every send emits `aside:sent-back` on `pi.events` with `{question, via: "history" | "mark" | "forward", afterMs}`,
+next to `aside:done`, so the misroute rate of ux §5.2 can be counted by whoever records U7.
+
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, 169 tests)
+### 3.1 Offline (`bun run check`, 189 tests)
 
-Final 0.5.0 check: TypeScript passed; **169 tests passed, 0 failed, 731 assertions**, across 7 files in 51.51 s.
+Final 0.6.0 check: TypeScript passed; **189 tests passed, 0 failed, 875 assertions**, across 8 files in 69.84 s.
+(0.5.0: 169 tests, 731 assertions, 7 files.)
 
 A local capture server speaks the three APIs as pi-ai consumes them. Real Pi 1.4.0 runs over RPC and, for the
 interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
@@ -261,6 +293,7 @@ interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 | Order | A payload replacement by an extension loaded after pi-aside (the tap). Loading as an installed package. |
 | Follow-ups | The fork continues; after the main session moves, it forks again with the earlier exchange quoted. |
 | TUI | Busy `?` routing and hints, CJK punctuation, normal steers and idle prompts, Esc closing only the aside and guarding double presses, cancelling a running aside, Enter and agent sends leaving the panel open, next-step suggestions, direct relay, route fallback, bracketed paste, background work, spinner/thinking, Markdown, long answers and ctrl+o, typing in the reader, panel wheel/touch targets, reader wheel and close, fresh versus follow-up threads, and route-before-tool behavior. |
+| 0.6.0 | ↑ ↵ while the aside answers (the hint, the stop, the steer with the user's text, no second aside request); recalled after Esc and edited; sent once; typing the same question again and browsing past it in the history stay on the side; a tap on ↪; `forward:` sends the previous question verbatim. Units: the `forward:` line, the notice, both hints, the panel after a send, the forward mark's place and tap zone, the two-minute window. Mutation checks: disabling the take-back or its input branch fails the key-replay tests. |
 | 0.5.0 | Hidden/sanitized next suggestions and Tab to `/aside`; no-main-tools relay; queued-to-read TUI status; parent inbox and child main-agent relay; response-24 summary and fresh continuation; SessionManager round-trip, discovery, pending main tools and protocol stripping; safe tmux command/name construction; move waits for a tool and skips later calls; non-tmux command fallback; count text and expanded close touch zones. |
 | Effort | On models with mid-conversation effort, the aside's E carries `low` and everything else matches the main request (Anthropic and Responses); other models keep the main level. |
 | Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money, the panel room and count line, the claim on ctrl+o, the reader's keys. |

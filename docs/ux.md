@@ -1,6 +1,7 @@
 # pi-aside: interaction design
 
-Status: implemented, revision 9 (pi-aside 0.5.0). The panel is a small window with answers, a title and
+Status: implemented, revision 10 (pi-aside 0.6.0). A message the `?` rule took aside can go to the agent instead
+("↑ ↵", §3.4.1). The panel is a small window with answers, a title and
 close mark. Only ongoing work adds a progress line. Direct requests relay findings to the main agent or move
 the conversation into its own Pi window. Optional next-step suggestions use the user's language and begin
 with `/aside` in the empty editor. Interface strings are English. The engine remains the cache-checked fork
@@ -79,7 +80,7 @@ question mark is a steer, exactly as today.
   editor: `↵ asks on the side · corrections still reach the agent`, or `↵ follows up on the side · …` while an
   aside panel is open (§3.2). If the text has no `?`, nothing new is shown.
 - The rule is one character long and lives in the user's own text. To steer with a question, the user deletes the
-  `?`. To ask the agent itself, the user presses Alt+Enter.
+  `?`. To ask the agent itself, the user presses Alt+Enter. After Enter, ↑ ↵ sends it to the agent instead (§3.4.1).
 - People already put `?` on questions, so the rule is learned by using it, not by reading about it.
 
 ### 3.2 The answer is a small window above the editor
@@ -153,6 +154,10 @@ the aside ends its reply with a hidden `tell: <message>` line. It never sends on
 asking for a relay through `next:`. The relay is self-contained because the main agent has not seen the aside.
 Relay requests stay `route: side`; the aside must never claim it cannot reach the agent.
 
+A request to send the user's previous message on unchanged ("send that to the agent as it is") ends the reply
+with a hidden `forward:` line instead. Code then sends that earlier question verbatim, as the user's own message
+(§3.4.1); the panel shows `↪ sent to the agent` and the text. `tell:` stays for findings or reworded messages.
+
 Delivery uses a displayed custom message with steer delivery and a triggered turn. While the agent runs, it
 reads the relay after its current step without aborting it. While idle, it starts a turn. The transcript prefix is
 `aside ›` (or `aside:<window-name> ›` from a promoted Pi). The model sees a user-side instruction explicitly
@@ -200,6 +205,45 @@ The aside request itself answers the routing question, so no extra request is ne
 - No tool runs before an explicit `side` route; an `agent` route ends the aside before tools. Cancelling
   a request never forwards its partial route line. Esc follows the window behavior in §3.2.
 
+### 3.4.1 Sending it to the agent instead
+
+The route check cannot recognise every message meant for the agent. A question the user wants the agent itself to
+answer (`why did you pick B?`, meaning "explain yourself, then reconsider") reads as a side question; only the user
+knows. So the user can overrule the guess cheaply. Sending a message to the agent instead does what Enter would have
+done without pi-aside: the user's own text, unchanged, as their own message, a steer while the agent runs and a
+prompt otherwise. No model is involved.
+
+```text
+ ╭─ why are you deleting the tests? ──────────── ↪ ── ✕ ─╮
+ │ ⠋ working · 2s                                        │
+ ╰───────────────────────────────────────────────────────╯
+ ── ⠋ Working ───────────────────────────────────────────
+                                           ← empty editor
+ ─────────────────────────────────────────────────────────
+ ↑↵ sends it to the agent instead
+```
+
+- **↑ ↵.** Pi keeps the message in its prompt history, so ↑ brings it back. While the editor holds it, the hint
+  says `↵ sends to the agent · it was asked on the side`, and Enter sends it with Pi's meaning. It may be edited
+  first. Only a message recalled from the history goes back. Typing the same words again asks on the side, as a
+  repeated status question should, and browsing past it in the history takes nothing back.
+- **The hint.** While the aside answers and the editor is empty, the line below the editor says
+  `↑↵ sends it to the agent instead`. Once the answer is done, the line gives way to the `next:` suggestion;
+  ↑ ↵ still works.
+- **↪.** In fullscreen mode, the forward mark beside ✕ does the same with one tap. It is shown only while the
+  message can still go, and two edge cells apart from ✕.
+- **In words.** Asking the aside to send the previous message as it is ends its reply with `forward:` (§3.3).
+- **What happens to the aside.** It stops. What it said so far stays in the panel, with `↪ sent to the agent`
+  below it; the reader says the same. Completed tool calls are not undone. The next `?` starts a new side
+  conversation.
+- **How long.** Until another aside starts, the session changes, or `TAKE_BACK_MS` (two minutes) after the answer
+  ends. A misroute shows when the panel opens or while the answer is read; a question asked again minutes later
+  is a new side question. A message goes to the agent once.
+- **Cost.** The stopped aside request is the only extra one: a cache read and the few tokens it wrote, as for
+  `route: agent`. The agent gets no extra request: the steer joins its loop as it would have without pi-aside.
+  Waiting a few seconds before asking on the side would save this only on the rare misroute, make every aside
+  slower, and miss the misroutes noticed while reading the answer.
+
 ### 3.5 Usage stays in Pi
 
 Pi's footer and session usage entries account for the aside. The panel has no cost, status or teaching footer.
@@ -218,7 +262,7 @@ for inspection. Three rebuilt asides in succession still produce one notice with
 | Tell the main agent | Explicitly ask the aside to relay it |
 | Move into a separate Pi | Explicitly ask to move out |
 | Requests about the main agent's work ending in `?` | The route check sends them to the agent |
-| Recover from a wrong guess | Ask the aside to tell the main agent |
+| Recover from a wrong guess | ↑ ↵ (or ↪) sends the message to the agent instead (§3.4.1) |
 | Read a long answer | The panel grows; ctrl+o on its count line opens the reader |
 | Scroll | Wheel or swipe over the panel or reader (fullscreen) |
 | Reread | `/aside` |
@@ -235,9 +279,11 @@ for inspection. Three rebuilt asides in succession still produce one notice with
 |---|---|---|
 | Enter | Send. While busy, a question-mark ending asks on the side (or follows up while the panel is open), subject to the route check. Empty Enter leaves the panel alone | Extended, visibly |
 | Alt+Enter | Queue a follow-up | Pi |
+| ↑ on an empty editor | Pi's history. The message the `?` rule just took aside comes back, and Enter sends it to the agent (§3.4.1) | Pi, extended visibly |
 | Esc | Close the reader or panel in front; with no aside open, Pi's abort after the 500 ms double-press guard | Window behavior |
 | Wheel or swipe | Scroll the panel or reader underneath it; outside, Pi's scrolling | Fullscreen mouse input |
 | Click or tap on ✕ | Close the panel or reader | Fullscreen mouse input |
+| Click or tap on ↪ | Send the question to the agent instead | Fullscreen mouse input |
 | Click or tap on a count line | Open the reader | Fullscreen mouse input |
 | Typing in the reader | Closes it; the text goes on in the editor | Natural |
 | Tab | Autocomplete, also fills `/aside …` from a suggestion in an empty editor | Pi |
@@ -319,6 +365,7 @@ request. Invalid or missing values become `aside-N` and `tell the agent when you
 | Existing tool validation/permissions | Private session executor bridge through `ctx.executeTool` |
 | Relay and move without new tools | Hidden reply lines `tell:` / `move:`; the fork's tool list stays the main one's |
 | Direct relay | `pi.sendMessage`, `deliverAs: "steer"`, `triggerTurn: true`, `message_start` |
+| Sending it to the agent instead | Pi adds a submitted message to its prompt history before `prompt`; `onTerminalInput` sees the history keys; `input` returns `continue`, so Pi itself steers or prompts |
 | Transcript prefixes | `pi.registerMessageRenderer` |
 | Display-only window link | `pi.appendEntry`, `pi.registerEntryRenderer`; custom entries are excluded from context |
 | Editor hint and suggestion | `setWidget`; `onTerminalInput`, `getEditorText`, `setEditorText` for Tab |
@@ -336,9 +383,9 @@ cache checks are unchanged. See `implementation.md` for evidence and limits.
 1. **The route check says `agent` for a real question.** The question becomes a steer, which is Pi's behaviour
    today. Measurement: the rate of `route: agent`, and a local sample of the texts for review. If it is high, the
    notice is tuned. No user harm beyond the status quo.
-2. **The route check says `side` for a request or a correction.** Its recovery is the
-   relay (§3.3). Measurement: how often a `?` aside is followed within 30 s by a relay or by a steer with
-   similar text. If that happens in more than 15 % of asides over a week of real use, the rule becomes opt-in, and
+2. **The route check says `side` for a request or a correction.** Its recovery is ↑ ↵ or ↪ (§3.4.1).
+   Measurement: how often a `?` aside is sent to the agent instead. Each one emits `aside:sent-back` on `pi.events`
+   (0.6.0), so the rate is a count, not the earlier estimate from relays or similar steers within 30 s. If that happens in more than 15 % of asides over a week of real use, the rule becomes opt-in, and
    the hint offers the side instead (key decided then). A correction misrouted this way lets the agent keep going
    until the user hands off or closes the aside and then stops the agent. A steer does not stop the agent at once either, because it lands after
    the current turn; Esc first closes the visible aside, then can stop the agent. This is the one misroute that does harm.
@@ -381,6 +428,7 @@ cache checks are unchanged. See `implementation.md` for evidence and limits.
 
 | U11 | A wheel or swipe over the panel scrolls it, including at its boundaries; tap close/more works in fullscreen; the reader also scrolls | Mouse-event replay in real Pi |
 | U12 | Independent tasks run callable tools with validation and permission hooks; a cancelled aside never forwards or starts later tool calls | Capture server, tool fixtures and cancellation regressions |
+| U13 | ↑ ↵ and ↪ send the message the `?` rule took aside to the agent verbatim, with Pi's meaning; the aside stops and keeps its text; typing the same words again, or browsing past it, asks on the side; `forward:` sends the previous question verbatim | Key and mouse replay in real Pi against the capture server |
 
 ## 7. Earlier design mistakes (historical)
 

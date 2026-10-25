@@ -30,8 +30,14 @@ export const MONEY_THRESHOLD = 0.25;
 export const HINT = "↵ asks on the side · corrections still reach the agent";
 /** The hint while the panel is open: the next question continues its thread (docs/ux.md §3.2). */
 export const FOLLOW_HINT = "↵ follows up on the side · corrections still reach the agent";
+/** While a `?` message the rule took aside is answered, with an empty editor: how to send it to the agent instead. */
+export const UNDO_HINT = "↑↵ sends it to the agent instead";
+/** The editor holds that message again (recalled with ↑ or typed again): Enter sends it to the agent (docs/ux.md §3.4). */
+export const BACK_HINT = "↵ sends to the agent · it was asked on the side";
 /** The close mark on the panel's top edge, where a click or a tap closes it (shown where Pi reports the mouse). */
 export const CLOSE_MARK = "✕";
+/** Beside the close mark: a click or a tap sends the question to the agent instead (where Pi reports the mouse). */
+export const FORWARD_MARK = "↪";
 
 /** Pi's own loader frames. */
 export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -56,8 +62,10 @@ export interface PanelState {
 	 * while it streams, its start once it is done.
 	 */
 	scrollTop?: number;
-	/** Set when the route check sent the text to the agent. */
-	sentToAgent?: { text: string; waiting: boolean };
+	/** Set when the text went to the agent: by the route check, or by the user ("↑ ↵", the forward mark). */
+	sentToAgent?: { text: string; waiting: boolean; byUser?: boolean };
+	/** The latest question can still go to the agent instead: the title shows the forward mark where Pi reports the mouse. */
+	forwardable?: boolean;
 }
 
 /** Markdown to terminal lines; `thinking` text is rendered dim and italic. */
@@ -143,6 +151,8 @@ export interface PanelView {
 	readerZones?: Array<{ row: number; from: number; to: number }>;
 	/** The long answer's scroll position and its largest value; undefined when it fits. */
 	scroll?: { top: number; max: number };
+	/** The title shows the forward mark, where a click or a tap sends the question to the agent instead. */
+	forward?: boolean;
 }
 
 function moreLabel(state: PanelState): string {
@@ -162,9 +172,9 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 	const turn = state.turns.at(-1);
 	if (!turn) return { lines: [] };
 	const dim = (s: string) => theme.fg("dim", s);
-	if (state.sentToAgent) {
-		return { lines: [dim(`↪ sent to the agent · it reads as ${state.sentToAgent.waiting ? "a request" : "a correction"}`)] };
-	}
+	const sent = state.sentToAgent;
+	// The route check sends before any answer; what the aside said before the user sent it on stays (no text is lost).
+	if (sent && !sent.byUser) return { lines: [dim(`↪ sent to the agent · it reads as ${sent.waiting ? "a request" : "a correction"}`)] };
 	const head: string[] = [];
 	const previous = state.turns.at(-2);
 	if (previous) head.push(truncateToWidth(dim(`after: ${previous.question.replace(/\s+/g, " ")}`), width, "…"));
@@ -175,8 +185,14 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 		...plainText(relay.message, Math.max(1, width - 2)).map(line => `${theme.fg("accent", "┃")} ${line}`),
 		dim(relay.read ? "It has read this." : "It will see this after its current step."),
 	]);
-	const body = [...stepLines(turn, width, theme), ...relays, ...(parsed.body ? md(parsed.body, width) : [])];
-	if (!turn.done) {
+	const forwarded = turn.forwarded === undefined ? [] : [
+		theme.fg("accent", "↪ sent to the agent"),
+		...plainText(turn.forwarded, Math.max(1, width - 2)).map(line => `${theme.fg("accent", "┃")} ${line}`),
+	];
+	const body = [...stepLines(turn, width, theme), ...relays, ...forwarded, ...(parsed.body ? md(parsed.body, width) : [])];
+	if (sent) {
+		tail.push(dim("↪ sent to the agent"));
+	} else if (!turn.done) {
 		if (turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
 	} else {
 		if (turn.aborted) tail.push(dim("stopped"));
@@ -227,6 +243,11 @@ export function closeZone(width: number): [number, number] {
 	return [width - 5, width - 1];
 }
 
+/** Columns of the top edge where a click or a tap sends the question to the agent: the forward mark and a cell around it. */
+export function forwardZone(width: number): [number, number] {
+	return [width - 10, width - 8];
+}
+
 /** `renderPanel`, and what the keys and the mouse do while these lines are on screen. */
 export function panelView(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): PanelView {
 	const turn = state.turns.at(-1);
@@ -238,11 +259,15 @@ export function panelView(state: PanelState, width: number, theme: Theme, md: Ma
 	// The spinner sits in the title while the answer streams, and on the progress line before it (never both).
 	const progress = !!turn.activity || parseReply(turn.raw, turn.done).body === "";
 	const spin = running && !progress ? `${spinnerFrame(now)} ` : "";
-	// The close mark sits at column width - 4: "╭─" title fill " ✕ " "─╮".
+	// The close mark sits at column width - 4: "╭─" title fill " ✕ " "─╮". The forward mark, at width - 9, keeps two
+	// cells of edge between them, so that a tap meant for one does not land on the other.
 	const close = state.mouse && width >= 20 ? ` ${CLOSE_MARK} ` : "";
-	const title = truncateToWidth(` ${spin}${question} `, Math.max(4, width - 6 - visibleWidth(close)), "…");
-	const fill = Math.max(0, width - 3 - visibleWidth(title) - (close ? visibleWidth(close) + 1 : 0));
-	const top = border("╭─") + theme.fg("muted", title) + border("─".repeat(fill)) + (close ? theme.fg("dim", close) + border("─") : "") + border("╮");
+	const forward = !!close && !!state.forwardable && !state.sentToAgent && width >= 30;
+	const mark = forward ? ` ${FORWARD_MARK} ` : "";
+	const gap = forward ? 2 : 0;
+	const title = truncateToWidth(` ${spin}${question} `, Math.max(4, width - 6 - visibleWidth(close) - visibleWidth(mark) - gap), "…");
+	const fill = Math.max(0, width - 3 - visibleWidth(title) - (close ? visibleWidth(close) + 1 : 0) - visibleWidth(mark) - gap);
+	const top = border("╭─") + theme.fg("muted", title) + border("─".repeat(fill)) + (mark ? theme.fg("accent", mark) + border("─".repeat(gap)) : "") + (close ? theme.fg("dim", close) + border("─") : "") + border("╮");
 	const out = [truncateToWidth(top, width)];
 	const body = panelBodyView(state, inner, theme, md, now);
 	for (const line of body.lines) {
@@ -250,17 +275,23 @@ export function panelView(state: PanelState, width: number, theme: Theme, md: Ma
 		out.push(`${border("│")} ${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))} ${border("│")}`);
 	}
 	out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
-	return { lines: out, more: body.more, readerRows: body.readerRows?.map((row) => row + 1), readerZones: body.readerRows?.map(row => ({ row: row + 1, from: 2, to: Math.min(width - 3, 1 + visibleWidth(body.lines[row]!)) })), scroll: body.scroll };
+	return { lines: out, more: body.more, readerRows: body.readerRows?.map((row) => row + 1), readerZones: body.readerRows?.map(row => ({ row: row + 1, from: 2, to: Math.min(width - 3, 1 + visibleWidth(body.lines[row]!)) })), scroll: body.scroll, ...(forward ? { forward } : {}) };
 }
 
-/** What Enter would do with the editor's text: nothing new, ask on the side, or follow up on the open panel's thread. */
-export type HintKind = "ask" | "follow" | undefined;
+/**
+ * What Enter would do with the editor's text: nothing new, ask on the side, follow up on the open panel's thread, or
+ * send the message the `?` rule took aside to the agent (`back`). `undo`: the editor is empty while that message is
+ * answered, and ↑ ↵ would send it to the agent instead.
+ */
+export type HintKind = "ask" | "follow" | "back" | "undo" | undefined;
+
+const HINTS: Record<Exclude<HintKind, undefined>, string> = { ask: HINT, follow: FOLLOW_HINT, back: BACK_HINT, undo: UNDO_HINT };
 
 /** Below the editor: the hint before an Enter that asks on the side, or the next-step placeholder. */
 export function renderBelow(input: { hint: HintKind | boolean; next: string | undefined }, width: number, theme: Theme): string[] {
 	const lines: string[] = [];
 	if (input.next) lines.push(truncateToWidth(theme.fg("dim", `/aside ${input.next}`), width));
-	if (input.hint) lines.push(truncateToWidth(theme.fg("dim", input.hint === "follow" ? FOLLOW_HINT : HINT), width));
+	if (input.hint) lines.push(truncateToWidth(theme.fg("dim", typeof input.hint === "string" ? HINTS[input.hint] : HINT), width));
 	return lines;
 }
 
@@ -402,10 +433,12 @@ function isMoreKey(data: string): boolean {
 	}
 }
 
-/** Only the count's visible text opens the reader; close wins on both top rows. */
-export function panelHit(view: PanelView, width: number, x: number, y: number, mouse: boolean): "close" | "reader" | undefined {
+/** Only the count's visible text opens the reader; close and forward win on both top rows. */
+export function panelHit(view: PanelView, width: number, x: number, y: number, mouse: boolean): "close" | "forward" | "reader" | undefined {
 	const [from, to] = closeZone(width);
 	if (mouse && y >= 0 && y <= 1 && x >= from && x <= to) return "close";
+	const [forwardFrom, forwardTo] = forwardZone(width);
+	if (mouse && view.forward && y >= 0 && y <= 1 && x >= forwardFrom && x <= forwardTo) return "forward";
 	if (view.readerZones?.some(zone => y === zone.row && x >= zone.from && x <= zone.to)) return "reader";
 	return undefined;
 }

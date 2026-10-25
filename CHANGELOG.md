@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.0
+
+- A message the `?` rule took aside can go to the agent instead. Press ↑ to bring it back from Pi's history: the
+  hint says `↵ sends to the agent · it was asked on the side`, and Enter sends it as you wrote it, as a steer while
+  the agent runs and a prompt otherwise, exactly what Enter does without pi-aside. It may be edited first. The aside
+  stops and keeps what it said, with `↪ sent to the agent` below. While the aside answers, an empty editor shows
+  `↑↵ sends it to the agent instead`. In fullscreen, a tap on ↪ beside ✕ does the same.
+- Only a recalled message goes back: typing the same question again still asks on the side. A message can go back
+  until another aside starts or two minutes after its answer, once.
+- Asking the aside to “send that to the agent as it is” sends your earlier message verbatim (a hidden `forward:`
+  line), instead of a reworded relay.
+
 ## 0.5.4
 
 - No behavior change. Removed private provider names from the design notes.

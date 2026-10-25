@@ -49,7 +49,11 @@ export function writePromotedSession(options: { cwd: string; branch: Any[]; hist
 				const reply = parseReply(part.text, true);
 				if (reply.tell) told.push(reply.tell);
 				// Without tell_agent in the new window, a delivered relay stays in words.
-				const text = [reply.body, reply.tell && !options.relay ? `[Delivered to the main agent: ${reply.tell}]` : ""].filter(Boolean).join("\n\n");
+				const text = [
+					reply.body,
+					reply.tell && !options.relay ? `[Delivered to the main agent: ${reply.tell}]` : "",
+					reply.forward ? "[Sent the user's previous message to the main agent unchanged.]" : "",
+				].filter(Boolean).join("\n\n");
 				return text ? [{ ...part, text }] : [];
 			});
 		}
