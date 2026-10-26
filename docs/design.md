@@ -129,7 +129,10 @@ The aside opens as an overlay panel, and the main session keeps running undernea
 - `exact · read 0, wrote 151,040 · $0.77` — the provider wrote instead of reading. The usual cause is an expired
   main cache. The write serves the main session's next turn if that turn keeps the same model, credential and
   prefix;
-- `rebuilt · not expected to hit` plus the reason (§4.8).
+- `rebuilt (<reason>) · read 25,139, wrote 128,133 · $0.62` (§4.8). The counts are the first request's, so they
+  show what the main session's cache gave. When tool rounds made more requests, `6 requests: read …, wrote …`
+  follows; those mostly read the aside's own cache. A model without prices shows `no prices set for this model`
+  instead of `$0.000`.
 
 **Status line.** It shows `aside: replying…` or `aside: reply ready` while the panel is hidden.
 
@@ -199,8 +202,20 @@ observation. An R that does not reproduce P fails C1, and the aside falls to T1.
 Other rules:
 - **Cloning.** Attempts are kept by reference and cloned only when promoted. Handlers after pi-aside that mutate in
   place are therefore seen.
-- **Dropping.** The observation is dropped on `session_compact`, `session_tree`, `session_start` and
-  `session_shutdown`.
+- **Dropping.** The observation is dropped on `session_tree`, `session_start` and `session_shutdown`.
+- **Compaction (0.6.1).** On `session_compact` the last usable observation is kept while its cache is warm, so
+  an aside reads P's cached prefix instead of writing the compacted context afresh. P is still a correct fork: it
+  is what the provider saw, and G skips compaction entries, whose summary T already covers. Warm means used
+  within the cache lifetime less 30 s. Use is the main response to P, then every exact aside request. The
+  lifetime comes from P: 1 hour with an Anthropic `ttl: "1h"` marker, 24 hours with OpenAI
+  `prompt_cache_retention: "24h"`, otherwise 5 minutes. The observation is dropped after an overflow compaction,
+  because the old context no longer fits. It is also dropped when it is cold, because then writing the smaller
+  compacted context costs less, and while a request is open. A kept observation that goes cold later is no longer
+  chosen. The next main request replaces it.
+  - Why: pi-zip compacts while the agent is idle, sometimes within a minute of its last request. Dropping P then
+    made every aside rebuild a context that matched neither the warm cache nor the main session's next request,
+    which extensions shape at the request boundary (a session on 2026-10-26 wrote 128,133 and 38,223 tokens
+    for two asides that would have read a warm 176k prefix).
 - **Ordering limit.** Handlers run in extension load order (`runner.js:1066-1094`). A later handler that *replaces*
   the object is not seen, nor is a later `context_with_system` handler. Built-in and inline extensions can load
   after packages (`resource-loader.js:571`). Every guarantee is therefore relative to the observation (A2).
@@ -491,7 +506,7 @@ Ctrl+S sends the discussion to the main session as one custom message, framed as
 | Tier | When | Request | Label |
 |---|---|---|---|
 | T0 exact | A ready observation exists, the API and transport are supported, and C1–C3 pass | §4.2 | `exact` |
-| T1 rebuilt | Anything else | `conv(branch ++ Q)` on the last physical model; the virtual router (`reason: "direct"`) only if no physical model is known | `rebuilt: not expected to hit`, plus the reason |
+| T1 rebuilt | Anything else | `conv(branch ++ Q)` on the last physical model; the virtual router (`reason: "direct"`) only if no physical model is known | `rebuilt (<reason>)` with the first request's cache counts |
 
 **T1 is isolated from the main session's transport state.** It uses:
 - a fresh session id;

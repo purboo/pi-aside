@@ -68,7 +68,10 @@ export function toContext(messages: unknown[], blockImages: boolean): Any {
 	return normalizeContext({ messages: converted });
 }
 
-/** G: the messages the branch gained since the observation's leaf, or undefined if the leaf left the branch. */
+/**
+ * G: the messages the branch gained since the observation's leaf, or undefined if the leaf left the branch. A
+ * compaction after the leaf is skipped: T already holds everything its summary covers.
+ */
 export function gainedSince(sessionManager: Any, leafId: string | null): unknown[] | undefined {
 	const branch: Any[] = sessionManager.getBranch();
 	let start = 0;
@@ -77,7 +80,10 @@ export function gainedSince(sessionManager: Any, leafId: string | null): unknown
 		if (index < 0) return undefined;
 		start = index + 1;
 	}
-	return branch.slice(start).flatMap((entry) => sessionEntryToContextMessages(entry));
+	return branch
+		.slice(start)
+		.filter((entry) => entry.type !== "compaction")
+		.flatMap((entry) => sessionEntryToContextMessages(entry));
 }
 
 export const STILL_RUNNING = "(still running in the main session; its result is not available yet)";
@@ -437,6 +443,7 @@ async function sendExact(
 	let restart = false;
 	let fallback: string | undefined;
 	let sent: Payload | undefined;
+	let sentAt: number | undefined;
 	// Same-tick send of a private model recipe (§4.2): look up, clone, snapshot the environment and start the
 	// stream in one synchronous step.
 	const registered = env.registry.find(recipe.provider, recipe.modelId);
@@ -477,12 +484,15 @@ async function sendExact(
 			throw new Fallback(c3.reason);
 		}
 		sent = f;
+		sentAt = Date.now();
 		return f;
 	};
 	const stream = env.registry.streamSimple(clone, context, options);
 	const message = await pump(stream, onEvent, () => sent !== undefined);
 	if (restart) return "restart";
 	if (fallback) return demote(env, fork, fallback, messages, signal, onEvent);
+	// A request the provider answered read P's prefix again and renewed its cache.
+	if (sentAt !== undefined && message?.stopReason !== "error") fork.observation!.touch(sentAt);
 	return { message, tier: "exact", markers: sent ? countMarkers(sent) : undefined, sent };
 }
 

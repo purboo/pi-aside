@@ -96,7 +96,9 @@ pi-aside observes the request the main session actually sent (P) and the transcr
 that request with the same recipe, appends what the session gained since then and the question, checks that the
 result extends P byte for byte (checks C1–C3), and sends it through Pi's model registry with the main session's
 credentials. Any check that fails falls back to a rebuilt request, labelled `rebuilt`, which still works but does not
-read the cache.
+read the cache. A compaction keeps the observed request while its cache is warm (5 minutes, or 1 hour with a
+1-hour cache marker): an aside right after pi-zip or `/compact` still reads it. The reader's detail line shows
+the first request's cache counts, then the totals when tool rounds made more requests.
 
 - Exact forks require native mid-conversation tool additions to preserve the main tool declarations. Otherwise the
   existing checks select the rebuilt path. Supported APIs are `anthropic-messages`, `openai-responses` and

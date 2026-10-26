@@ -296,6 +296,43 @@ describe("handlers and fallbacks", () => {
 		expect(JSON.stringify(server.requests[0]!.body.system)).toContain("pi");
 	}, 60_000);
 
+	test("after a compaction the warm request is still the fork: exact, no summary, the old transcript", async () => {
+		server = await startCaptureServer();
+		// Keep almost nothing, so that a two-turn session has something to compact.
+		pi = await startPi({ baseUrl: server.url, api: "anthropic", extensions: [PROBE, ASIDE], settings: { compaction: { keepRecentTokens: 1 } } });
+		server.enqueue({ text: "Noted.", usage: { input: 40, cacheWrite: 800 } });
+		await pi.prompt("the project is called Ladder");
+		await pi.waitForAgentEnd(1);
+		server.enqueue({ text: "The plan has three steps.", usage: { input: 40, cacheRead: 800, cacheWrite: 100 } });
+		await pi.prompt("make a plan");
+		await pi.waitForAgentEnd(2);
+		// Pi summarizes the history and the split turn's prefix separately: two requests.
+		server.enqueue({ text: "COMPACTION-SUMMARY: a plan was made.", usage: { input: 900, output: 20 } });
+		server.enqueue({ text: "COMPACTION-SUMMARY: the turn asked for a plan.", usage: { input: 900, output: 20 } });
+		const compacted = await pi.send({ type: "compact" }, 30_000);
+		expect([compacted.success, compacted.error]).toEqual([true, undefined]);
+		const n = server.requests.length;
+		expect(n).toBe(4);
+		server.enqueue({ text: "route: side\nThree steps.", usage: { input: 10, cacheRead: 900 } });
+		await pi.prompt("/aside how many steps?");
+		const done = await asideDone(pi);
+		expect(done.error).toBeUndefined();
+		expect(done.tier).toBe("exact");
+		const main = server.requests[1]!;
+		const aside = server.requests[n]!;
+		expectExtends("anthropic", aside.body, main.body);
+		const text = JSON.stringify(aside.body);
+		expect(text).not.toContain("COMPACTION-SUMMARY");
+		expect(text).toContain("the project is called Ladder");
+		// The compaction is real: the main session's next request starts from the summary.
+		server.enqueue({ text: "Step one.", usage: { input: 30, cacheWrite: 300 } });
+		await pi.prompt("go on");
+		await pi.waitForAgentEnd(3);
+		const next = JSON.stringify(server.requests[n + 1]!.body);
+		expect(next).toContain("COMPACTION-SUMMARY");
+		expect(next).not.toContain("the project is called Ladder");
+	}, 60_000);
+
 	test("a follow-up continues the fork; after the main session moves it forks again", async () => {
 		server = await startCaptureServer();
 		pi = await startPi({ baseUrl: server.url, api: "anthropic", extensions: [PROBE, ASIDE] });

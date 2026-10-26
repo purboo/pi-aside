@@ -52,6 +52,11 @@ export class Observation {
 	headerNames: string[] = [];
 	ready = false;
 	usage: ObservedUsage | undefined;
+	/** When the provider last read or wrote P's prefix: the main response, then every exact aside request. */
+	lastUse: number | undefined;
+	/** A compaction followed this request: it stays usable only while its cache is warm (`warm`). */
+	compacted = false;
+	private ttl: number | undefined;
 	private listeners = new Set<() => void>();
 
 	constructor(seq: number, transcript: unknown[], leafId: string | null, recipe: Recipe) {
@@ -82,6 +87,18 @@ export class Observation {
 		return this.state === "promoted" && this.ready && this.payload !== undefined;
 	}
 
+	/** An exact aside request sent at `at` read P's prefix again, which renews its cache. */
+	touch(at: number): void {
+		if (this.lastUse === undefined || at > this.lastUse) this.lastUse = at;
+	}
+
+	/** Whether P's prefix is likely still cached: last used within its lifetime, less a margin for the request. */
+	warm(now: number): boolean {
+		if (this.lastUse === undefined || !this.payload) return false;
+		this.ttl ??= cacheTtlMs(this.payload);
+		return now - this.lastUse < this.ttl - WARM_MARGIN_MS;
+	}
+
 	onChange(listener: () => void): () => void {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);
@@ -102,12 +119,40 @@ export class Observation {
 	}
 }
 
+const MINUTE = 60_000;
+const WARM_MARGIN_MS = 30_000;
+
+/**
+ * How long the provider keeps a prompt cached after its last use: 1 hour for Anthropic `ttl: "1h"` markers, 24
+ * hours for OpenAI `prompt_cache_retention: "24h"`, otherwise 5 minutes (Anthropic's default, and the low end of
+ * OpenAI's automatic caching).
+ */
+export function cacheTtlMs(payload: unknown): number {
+	if ((payload as Record<string, unknown> | undefined)?.prompt_cache_retention === "24h") return 24 * 60 * MINUTE;
+	return hasHourMarker(payload, 0) ? 60 * MINUTE : 5 * MINUTE;
+}
+
+function hasHourMarker(value: unknown, depth: number): boolean {
+	if (depth > 6 || !value || typeof value !== "object") return false;
+	if (Array.isArray(value)) return value.some((item) => hasHourMarker(item, depth + 1));
+	const marker = (value as Record<string, unknown>).cache_control as Record<string, unknown> | undefined;
+	if (marker?.ttl === "1h") return true;
+	return Object.values(value).some((item) => hasHourMarker(item, depth + 1));
+}
+
+export const NO_MAIN_REQUEST = "no main request observed yet";
+export const COMPACTED = "the context was compacted and the agent has not sent it since";
+export const COMPACTED_COLD = "the context was compacted and the main cache has expired";
+export const COMPACTED_OVERFLOW = "the context was compacted because it no longer fit";
+
 /** Tracks the latest logical request and the latest usable observation. */
 export class Observer {
 	private seq = 0;
 	latest: Observation | undefined;
 	/** The latest observation that became usable. */
 	lastUsable: Observation | undefined;
+	/** Why there is no observation since the last reset. */
+	private missing: string | undefined;
 	private generation = 0;
 	private listeners = new Set<() => void>();
 
@@ -125,11 +170,30 @@ export class Observer {
 		for (const listener of [...this.listeners]) listener();
 	}
 
-	reset(): void {
+	reset(reason?: string): void {
 		this.latest?.fail("failed", "session changed");
 		this.latest = undefined;
 		this.lastUsable = undefined;
+		this.missing = reason;
 		this.generation++;
+		this.notify();
+	}
+
+	/**
+	 * `session_compact`. The request sent before it is still a correct fork: P is what the provider saw, and G skips the
+	 * compaction entry. It is kept while its cache is warm, so an aside reads it instead of writing the compacted context
+	 * afresh. It is dropped after an overflow (the old context no longer fits), when it is cold (writing the smaller
+	 * compacted context costs less), and when a request is still open.
+	 */
+	compacted(overflow: boolean, now = Date.now()): void {
+		const kept = this.choose(now);
+		if (overflow || !kept || this.latest?.pending || !kept.warm(now)) {
+			this.reset(overflow ? COMPACTED_OVERFLOW : kept ? COMPACTED_COLD : COMPACTED);
+			return;
+		}
+		kept.compacted = true;
+		this.latest = kept;
+		this.lastUsable = kept;
 		this.notify();
 	}
 
@@ -199,6 +263,8 @@ export class Observer {
 		l.headerNames = l.headerRef ? Object.keys(l.headerRef).filter((k) => l.headerRef![k] != null) : [];
 		l.headerRef = undefined;
 		l.attempts = [];
+		// The provider has read P (and written its cache) by the time it answers.
+		l.lastUse = Date.now();
 		l.state = "promoted";
 		l.closed = true;
 		l.changed();
@@ -270,9 +336,21 @@ export class Observer {
 		}
 	}
 
-	/** The observation an aside should fork from: the latest if usable, else the last usable one. */
-	choose(): Observation | undefined {
-		if (this.latest?.usable) return this.latest;
-		return this.lastUsable?.usable ? this.lastUsable : undefined;
+	/**
+	 * The observation an aside should fork from: the latest if usable, else the last usable one. One kept across a
+	 * compaction counts only while its cache is warm.
+	 */
+	choose(now = Date.now()): Observation | undefined {
+		const pick = this.latest?.usable ? this.latest : this.lastUsable?.usable ? this.lastUsable : undefined;
+		if (pick?.compacted && !pick.warm(now)) return undefined;
+		return pick;
+	}
+
+	/** Why `choose` has nothing: the latest request's failure, a cold compacted one, or the last reset. */
+	whyNone(now = Date.now()): string {
+		if (this.latest && !this.latest.usable && this.latest.reason) return this.latest.reason;
+		const pick = this.latest?.usable ? this.latest : this.lastUsable;
+		if (pick?.compacted && !pick.warm(now)) return COMPACTED_COLD;
+		return this.missing ?? NO_MAIN_REQUEST;
 	}
 }

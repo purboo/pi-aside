@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.6.1
+
+- An aside right after a compaction reads the main cache again. The request observed before the compaction stays
+  the fork while its cache is warm: 5 minutes after its last use, or 1 hour with a 1-hour cache marker. Every
+  exact aside request counts as a use. Before, any compaction, including pi-zip's while the agent is idle, made
+  the next asides rebuild the context and write it all to the cache. They are still rebuilt after an overflow
+  compaction or once that cache has expired, now with that reason instead of `no main request observed yet`.
+- The reader's detail line shows the first request's cache counts, which tell whether the main cache was read.
+  The totals of all requests follow when tool rounds made more; they mostly read the aside's own cache. Before,
+  `rebuilt: not expected to hit · read 594,175` looked like a hit. A model without prices in models.json shows
+  `no prices set for this model` instead of `$0.000`. The expired-cache money line is judged by the first request.
+
 ## 0.6.0
 
 - A message the `?` rule took aside can go to the agent instead. Press ↑ to bring it back from Pi's history: the

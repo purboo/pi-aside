@@ -69,9 +69,13 @@ export interface TurnView {
 	effort?: string;
 	tier?: Tier;
 	reason?: string;
+	/** Totals over every request of the turn (tool rounds read the aside's own cache) and its tools' results. */
 	cost: number;
 	read: number;
 	written: number;
+	/** Model requests of the turn, and the cache counts of the first: whether the main session's cache was read. */
+	requests?: number;
+	first?: { read: number; written: number };
 	/** The main response's cacheable prefix at the fork (T0). */
 	predicted?: number;
 	aborted?: boolean;
@@ -158,10 +162,13 @@ function toolResult(call: Any, text: string, isError: boolean): Any {
 	};
 }
 
-/** Count the branch entries that put something into the model context. */
+/**
+ * Count the branch entries that put something into the model context. A compaction is not counted: a fork made
+ * before it stays correct (G skips it), and if its observation is dropped the thread sees that instead.
+ */
 function contextEntryCount(sessionManager: Any): number {
 	const branch: Any[] = sessionManager.getBranch();
-	return branch.filter((e) => e.type === "message" || e.type === "custom_message" || e.type === "compaction" || e.type === "branch_summary").length;
+	return branch.filter((e) => e.type === "message" || e.type === "custom_message" || e.type === "branch_summary").length;
 }
 
 export class AsideThread {
@@ -213,8 +220,8 @@ export class AsideThread {
 	/** Whether the main session gained context since this thread's last request. */
 	private mainMoved(): boolean {
 		if (!this.fork) return true;
-		const latest = this.host.observer.choose();
-		if (latest && latest.seq !== this.observationSeq) return true;
+		// A newer request, or the thread's own observation went cold after a compaction.
+		if (this.host.observer.choose()?.seq !== this.observationSeq) return true;
 		return contextEntryCount(this.host.env.sessionManager) !== this.contextCount;
 	}
 
@@ -258,9 +265,8 @@ export class AsideThread {
 				update();
 				await this.host.observer.settle(signal);
 				if (signal.aborted) throw new DOMException("aborted", "AbortError");
-				const latest = this.host.observer.latest;
 				const observation = this.host.observer.choose();
-				const why = latest && !latest.usable ? latest.reason : undefined;
+				const why = observation ? undefined : this.host.observer.whyNone();
 				turn.activity = undefined;
 				const fork = await makeFork(this.host.env, observation, why);
 				signal.throwIfAborted();
@@ -461,6 +467,8 @@ export class AsideThread {
 		turn.written += usage.cacheWrite ?? 0;
 		// A request that failed before reaching the provider reports nothing.
 		if (!(usage.input || usage.output || usage.cacheRead || usage.cacheWrite)) return;
+		turn.requests = (turn.requests ?? 0) + 1;
+		turn.first ??= { read: usage.cacheRead ?? 0, written: usage.cacheWrite ?? 0 };
 		const parts = [
 			`tier=${result.tier}`,
 			result.reason ? `reason=${JSON.stringify(result.reason)}` : undefined,

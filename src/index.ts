@@ -7,6 +7,7 @@ import { BackgroundWork } from "./busy.ts";
 import type { ForkEnv } from "./fork.ts";
 import { Observer, type Recipe } from "./observe.ts";
 import {
+	detailLine,
 	panelHit,
 	type HintKind,
 	type MarkdownRenderer,
@@ -254,16 +255,16 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (ticker) clearInterval(ticker);
 		ticker = undefined;
 	});
-	pi.on("session_compact", (_event, ctx) => {
+	pi.on("session_compact", (event, ctx) => {
 		ctxRef = ctx;
-		observer.reset();
+		observer.compacted(event.reason === "overflow");
 	});
 	pi.on("session_tree", (_event, ctx) => {
 		askSeq++;
 		thread?.abort();
 		forgetRetractable();
 		ctxRef = ctx;
-		observer.reset();
+		observer.reset("the session moved in its tree");
 	});
 
 	// ---------------------------------------------------------------- busy and routing (ux §3.1)
@@ -615,24 +616,13 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 	}
 
-	/** Detail line: tier, cache read against the cacheable prefix, cost. In the status bar only in RPC mode. */
+	/**
+	 * Detail line: tier, then the first request's cache counts (whether the main session's cache was read), then the
+	 * totals when tool rounds made more requests (those read the aside's own cache), cost. In the status bar only in
+	 * RPC mode.
+	 */
 	function detail(turn: TurnView): string {
-		const fmt = (n: number) => n.toLocaleString("en-US");
-		const parts: string[] = [];
-		if (turn.tier === "exact") {
-			parts.push("exact");
-			parts.push(
-				turn.predicted !== undefined
-					? `read ${fmt(turn.read)} of ${fmt(turn.predicted)} cacheable${turn.written ? `, wrote ${fmt(turn.written)}` : ""}`
-					: `read ${fmt(turn.read)}, wrote ${fmt(turn.written)}`,
-			);
-		} else if (turn.tier === "rebuilt") {
-			parts.push(`rebuilt: not expected to hit${turn.reason ? ` (${turn.reason})` : ""}`);
-			parts.push(`read ${fmt(turn.read)}, wrote ${fmt(turn.written)}`);
-		}
-		if (turn.effort) parts.push(`thinking ${turn.effort}`);
-		parts.push(`$${turn.cost.toFixed(turn.cost < MONEY_THRESHOLD ? 3 : 2)}`);
-		return parts.join(" · ");
+		return detailLine(turn, MONEY_THRESHOLD);
 	}
 
 	function reportStatus(turn: TurnView): void {

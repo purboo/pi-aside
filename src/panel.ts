@@ -91,8 +91,37 @@ function formatCost(cost: number): string {
 export function moneyLine(turn: TurnView): string | undefined {
 	if (turn.cost < MONEY_THRESHOLD) return undefined;
 	if (turn.tier === "rebuilt") return `rebuilt context · ${formatCost(turn.cost)}${turn.reason ? ` · ${turn.reason}` : ""}`;
-	if (turn.written > 0) return `main cache had expired · ${formatCost(turn.cost)}`;
+	// Judged on the first request: later tool rounds always write their own new tail.
+	const first = turn.first ?? { read: turn.read, written: turn.written };
+	if (first.written > first.read) return `main cache had expired · ${formatCost(turn.cost)}`;
 	return undefined;
+}
+
+/**
+ * The reader's detail line: the tier, the first request's cache counts (whether the main session's cache was read),
+ * the totals when tool rounds made more requests (those mostly read the aside's own cache), and the cost.
+ */
+export function detailLine(turn: TurnView, threshold = MONEY_THRESHOLD): string {
+	const fmt = (n: number) => n.toLocaleString("en-US");
+	const first = turn.first ?? { read: turn.read, written: turn.written };
+	const parts: string[] = [];
+	if (turn.tier === "exact") {
+		parts.push("exact");
+		parts.push(
+			turn.predicted !== undefined
+				? `read ${fmt(first.read)} of ${fmt(turn.predicted)} cacheable${first.written ? `, wrote ${fmt(first.written)}` : ""}`
+				: `read ${fmt(first.read)}, wrote ${fmt(first.written)}`,
+		);
+	} else if (turn.tier === "rebuilt") {
+		parts.push(`rebuilt${turn.reason ? ` (${turn.reason})` : ""}`);
+		parts.push(`read ${fmt(first.read)}, wrote ${fmt(first.written)}`);
+	}
+	if ((turn.requests ?? 0) > 1) parts.push(`${turn.requests} requests: read ${fmt(turn.read)}, wrote ${fmt(turn.written)}`);
+	if (turn.effort) parts.push(`thinking ${turn.effort}`);
+	// A model without prices in models.json reports $0 for any number of tokens.
+	if (turn.cost === 0 && (turn.read > 0 || turn.written > 0)) parts.push("no prices set for this model");
+	else parts.push(`$${turn.cost.toFixed(turn.cost < threshold ? 3 : 2)}`);
+	return parts.join(" · ");
 }
 
 function elapsed(turn: TurnView, now: number): string {

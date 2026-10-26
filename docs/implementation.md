@@ -274,11 +274,31 @@ as a bracketed note.
 Every send emits `aside:sent-back` on `pi.events` with `{question, via: "history" | "mark" | "forward", afterMs}`,
 next to `aside:done`, so the misroute rate of ux §5.2 can be counted by whoever records U7.
 
+### 2.15 Compaction keeps a warm observation (0.6.1)
+
+Design §4.1 "Compaction". `Observer.compacted(overflow)` replaces the reset on `session_compact`. It keeps
+`choose()`'s observation, marked `compacted`, unless the compaction recovered from an overflow, a request is open,
+or the observation is cold. It does not bump the epoch, so a running side thread goes on. `Observation.lastUse` is
+set when the main response promotes P. `sendExact` renews it with the time of every exact request that the provider
+answered. `warm(now)` compares that time with `cacheTtlMs(P)`, less 30 s. `choose()` skips a compacted observation
+once it is cold. `whyNone()` then names the reason the reader shows: the latest request's failure, a cold or dropped
+compaction, the tree, or no main request since the session started.
+
+`gainedSince` skips compaction entries. Their summary, and the system message a compaction may carry, describe the
+main session's next context, not P's. A side thread does not count a compaction as main-session progress. If its
+observation is dropped or goes cold, `choose()` no longer returns that observation, and the thread forks again.
+
+Found on a second machine. In a session there, pi-zip compacted 37 s after the last exact aside. The next two asides
+rebuilt the context and wrote 128,133 and 38,223 tokens. The main session's next request, shaped by pi-zip at the
+request boundary, read only the 25,139-token system and tool prefix of either. The panel's `$0.000` came from that
+machine's models.json, which has no prices for its provider.
+
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, 189 tests)
+### 3.1 Offline (`bun run check`, 199 tests)
 
-Final 0.6.0 check: TypeScript passed; **189 tests passed, 0 failed, 875 assertions**, across 8 files in 69.84 s.
+Final 0.6.1 check: TypeScript passed; **199 tests passed, 0 failed, 921 assertions**, across 9 files in 69.70 s.
+(0.6.0: 189 tests, 875 assertions, 8 files.)
 (0.5.0: 169 tests, 731 assertions, 7 files.)
 
 A local capture server speaks the three APIs as pi-ai consumes them. Real Pi 1.4.0 runs over RPC and, for the
@@ -294,6 +314,7 @@ interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 | Follow-ups | The fork continues; after the main session moves, it forks again with the earlier exchange quoted. |
 | TUI | Busy `?` routing and hints, CJK punctuation, normal steers and idle prompts, Esc closing only the aside and guarding double presses, cancelling a running aside, Enter and agent sends leaving the panel open, next-step suggestions, direct relay, route fallback, bracketed paste, background work, spinner/thinking, Markdown, long answers and ctrl+o, typing in the reader, panel wheel/touch targets, reader wheel and close, fresh versus follow-up threads, and route-before-tool behavior. |
 | 0.6.0 | ↑ ↵ while the aside answers (the hint, the stop, the steer with the user's text, no second aside request); recalled after Esc and edited; sent once; typing the same question again and browsing past it in the history stay on the side; a tap on ↪; `forward:` sends the previous question verbatim. Units: the `forward:` line, the notice, both hints, the panel after a send, the forward mark's place and tap zone, the two-minute window. Mutation checks: disabling the take-back or its input branch fails the key-replay tests. |
+| 0.6.1 | Real Pi over RPC: two main turns, `compact` (two summary requests), an aside. The aside is exact, extends the pre-compaction request, and has no summary in it; the main session's next request starts from the summary. Units: kept while warm (5 minutes less 30 s), renewed by aside requests, dropped when cold, after an overflow or while a request is open, replaced by the next main request; the lifetime from 1-hour and 24-hour markers; G without compaction entries; the detail line's first request, totals and missing prices; the money line by the first request. Mutation checks: the old reset on compaction fails the RPC test (`rebuilt`), and G with compaction entries puts the summary in the aside. |
 | 0.5.0 | Hidden/sanitized next suggestions and Tab to `/aside`; no-main-tools relay; queued-to-read TUI status; parent inbox and child main-agent relay; response-24 summary and fresh continuation; SessionManager round-trip, discovery, pending main tools and protocol stripping; safe tmux command/name construction; move waits for a tool and skips later calls; non-tmux command fallback; count text and expanded close touch zones. |
 | Effort | On models with mid-conversation effort, the aside's E carries `low` and everything else matches the main request (Anthropic and Responses); other models keep the main level. |
 | Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money, the panel room and count line, the claim on ctrl+o, the reader's keys. |
