@@ -120,11 +120,12 @@ export function installToolExecutor(pi: ExtensionAPI): ToolExecutor {
 			// Pi's nested recorder bounds calls/arguments per scope. Reusing one parent per session
 			// also bounds the number of scopes when no transcript result consumes this record.
 			const result = await bridge.execute(`pi-aside:${sessionId}`, token, combined);
-			combined.throwIfAborted();
 			if (!result.details || typeof result.details.isError !== "boolean" || !result.details.result) {
+				combined.throwIfAborted();
 				throw new Error("Pi's aside executor returned an unsupported result");
 			}
-			const outcome = result.details as AgentToolCallOutcome;
+			// A cancelled call still returns what it did so far (a killed command's output), as a failure.
+			const outcome = combined.aborted ? { ...(result.details as AgentToolCallOutcome), isError: true } : (result.details as AgentToolCallOutcome);
 			// Pi runs a nested call against the main session's last assistant message; a session without one has none.
 			const text = outcome.isError ? (outcome.result?.content ?? []).map((part) => ("text" in part ? part.text : "")).join("") : "";
 			if (text === "No assistant message issued this call") {

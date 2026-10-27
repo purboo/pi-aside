@@ -13,7 +13,7 @@ in `design.md`; Pi 1.3.0 limitations and implementation departures are in `imple
 
 In practice this means five rules:
 1. **Change nothing that already works.** Fix only the moment that hurts.
-2. **Use familiar interactions.** Enter sends, Tab accepts a suggestion, Esc closes what is in front. A wheel or
+2. **Use familiar interactions.** Enter sends, Tab accepts a suggestion, Esc stops or closes what is in front. A wheel or
    swipe scrolls the content underneath it. Never show `tier`, `cache` or `fork` on the normal path.
 3. **Show the destination.** Opening a panel does not silently capture normal messages. Anything that changes
    what Enter does must be visible *before* the user commits.
@@ -95,10 +95,32 @@ question mark is a steer, exactly as today.
  editor…
 ```
 
-- **Close what is in front.** Esc closes the panel. If the aside is still answering or running a tool, it is
-  cancelled; the main agent keeps going. With no panel open, Esc keeps Pi's behavior. The reader and Pi's own
-  dialogs or autocomplete close first when they own the input. A second Esc within 500 ms after an aside closes
-  is consumed to protect against double presses and key repeat; after that interval Esc can stop the agent.
+- **Esc acts on what is in front, one step at a time.** While the aside answers, thinks or runs a tool, Esc
+  stops it at once and the panel stays; the main agent keeps going. Once the aside has stopped or answered, Esc
+  closes the panel. With no panel open, Esc keeps Pi's behavior and stops the agent. The reader and Pi's own
+  dialogs or autocomplete close first when they own the input. An Esc within 500 ms of one the aside took does
+  nothing, to absorb double presses and key repeat: a stop does not go on to close, and a close does not go on to
+  stop the agent.
+- **Say where Esc goes.** The edge that Esc acts on is lit: the panel's border is `borderAccent` while the aside
+  works and settles to `borderMuted` once it has stopped or answered. Its bottom edge names the keys for now:
+  `esc stop` while it works, `? continue · esc close` once stopped (`/aside continue` while the agent is idle,
+  when a `?` message would go to the agent), `esc close` once answered. Pi's working line says the same while the
+  panel is open: `Working · esc stops the aside first`, then `Working · esc closes the aside first`. An extension
+  that draws its own interrupt hint can listen to `aside:esc` (`{ action: "stop" | "close" | undefined }`) on
+  `pi.events`. After a stop while the agent runs, one muted line below the editor says `the agent is still running
+  · esc closes the aside, then esc stops the agent`.
+- **A stop keeps the work.** Finished steps stay with their ✓ or ✗. The text written so far stays. The step that
+  was running becomes `■ $ bun run build --profile ··· stopped · 41s`, in the warning color: a killed command
+  with its process tree, or the cut-off thinking or writing (`■ thinking`, `■ writing`). The thread keeps it all:
+  the finished calls with their results, the stopped call with what it printed so far and `Stopped by the user
+  after 41s`, the calls not run, and the cut-off text without its thinking. A follow-up continues after it, opens
+  with `(The user stopped your previous reply before it finished.)`, and reads the same request prefix from the
+  cache. A tool that ignores the cancellation has one second to return what it did; then the aside stops without
+  it. A follow-up typed while the aside still works waits for the current step, like a steer; Esc first stops
+  it now.
+- **Styling uses Pi's theme tokens only.** The spinner is the only animation. The live step reads in `text` with
+  its own time on the right, flush with the edge; finished steps are `dim` with a `success` ✓, failures `error`;
+  thinking is `thinkingText`, italic, like Pi's own.
 - **Touch and mouse.** In Pi's fullscreen mode, a close mark on the panel's top edge closes it. A wheel or swipe
   over the panel scrolls the aside, including at its boundaries; it never falls through to the main conversation.
   A wheel outside the panel keeps Pi's behavior. Clicking or tapping a count line opens the reader. The reader
@@ -266,9 +288,10 @@ for inspection. Three rebuilt asides in succession still produce one notice with
 | Read a long answer | The panel grows; ctrl+o on its count line opens the reader |
 | Scroll | Wheel or swipe over the panel or reader (fullscreen) |
 | Reread | `/aside` |
-| Close the aside | Esc or its close mark |
+| Stop the aside | Esc while it works; the panel stays, and a follow-up continues after the stopped step |
+| Close the aside | Esc once it has stopped or answered, or its close mark (which also stops it) |
 | Continue or start afresh | Open panel continues, closed starts afresh; the hint says which |
-| Stop the agent | Esc once the aside is closed and the double-press guard has elapsed |
+| Stop the agent | Esc once the aside is closed and the 500 ms double-press guard has elapsed |
 | Cheap answers | The engine, invisible |
 | Cost accounting | Pi's footer, unchanged |
 | Settings | None (A4) |
@@ -280,9 +303,9 @@ for inspection. Three rebuilt asides in succession still produce one notice with
 | Enter | Send. While busy, a question-mark ending asks on the side (or follows up while the panel is open), subject to the route check. Empty Enter leaves the panel alone | Extended, visibly |
 | Alt+Enter | Queue a follow-up | Pi |
 | ↑ on an empty editor | Pi's history. The message the `?` rule just took aside comes back, and Enter sends it to the agent (§3.4.1) | Pi, extended visibly |
-| Esc | Close the reader or panel in front; with no aside open, Pi's abort after the 500 ms double-press guard | Window behavior |
+| Esc | Stop the aside while it works; then close the reader or panel in front; with no aside open, Pi's abort. Within 500 ms of an Esc the aside took, nothing | Window behavior |
 | Wheel or swipe | Scroll the panel or reader underneath it; outside, Pi's scrolling | Fullscreen mouse input |
-| Click or tap on ✕ | Close the panel or reader | Fullscreen mouse input |
+| Click or tap on ✕ | Stop and close the panel, or close the reader | Fullscreen mouse input |
 | Click or tap on ↪ | Send the question to the agent instead | Fullscreen mouse input |
 | Click or tap on a count line | Open the reader | Fullscreen mouse input |
 | Typing in the reader | Closes it; the text goes on in the editor | Natural |
@@ -314,8 +337,8 @@ The routing boundary is the main agent's current task, not whether the message i
 without `?` still goes to the main agent; opening the panel does not capture Enter.
 
 The model is told to leave the main agent's files and processes alone. This is guidance, not a lock: both agents
-share the workspace, and tools can have external effects. Closing stops further work and requests cancellation of
-an in-flight tool; it cannot undo a completed edit or delete. Tool failures are shown to the aside as failures,
+share the workspace, and tools can have external effects. Stopping or closing ends further work and cancels an
+in-flight tool (a shell command with its process tree); it cannot undo a completed edit or delete. Tool failures are shown to the aside as failures,
 not as successful actions. MAX_TOOL_ROUNDS remains 24 per question. If response 24 still asks for tools,
 none of those calls run. Each receives `Not run: round limit reached. Summarize what is done and what is left,
 then stop.` One final request writes a summary with done ✓ and left …, then a hidden `next:` line. If absent,
@@ -416,7 +439,7 @@ cache checks are unchanged. See `implementation.md` for evidence and limits.
 | ID | Assertion | Method |
 |---|---|---|
 | U1 | Untaught use: three Pi users who were not told about pi-aside get a side answer and act on it in a scripted scenario | Observed session; no hints from the observer |
-| U2 | Esc closes an open panel, cancelling only the aside; a rapid second Esc does not stop the agent; a later Esc keeps Pi's behavior | Key replay |
+| U2 | Esc stops a running aside and leaves the panel, with its steps, text and the stopped step; a follow-up continues after it over the same request prefix; the next Esc closes; a rapid second Esc does nothing; with no aside open, Esc keeps Pi's behavior; the panel edge and Pi's working line say what Esc does | Key replay, thread replay |
 | U3 | The hint below the editor is present exactly when Enter will ask on the side | Snapshot plus key replay |
 | U4 | Normal-path screens contain no tier, cache, token or price text | Snapshot |
 | U5 | Only an explicit user relay request authorizes tell_agent; delivery adds one custom message | Capture server plus session file |

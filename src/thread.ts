@@ -11,6 +11,10 @@ import type { UsageQueue } from "./usage.ts";
 type Any = any;
 
 export const MAX_TOOL_ROUNDS = 24;
+/** After a stop, how long a tool may take to return what it did so far; then the aside stops without it. */
+export const STOP_GRACE_MS = 1000;
+/** The note that opens the question after a stopped reply. */
+export const STOPPED_NOTE = "(The user stopped your previous reply before it finished.)";
 /** Built-in tools that only read: their calls pass as an activity line and are not kept as steps. */
 export const READING_TOOLS = ["read", "grep", "find", "ls"] as const;
 
@@ -49,8 +53,14 @@ export interface TurnView {
 	raw: string;
 	done: boolean;
 	error?: string;
-	/** A dim activity line, such as `reading src/a.ts` or `$ du -sh ~`. */
+	/** The live activity line, such as `reading src/a.ts` or `$ du -sh ~`, and since when. */
 	activity?: string;
+	activitySince?: number;
+	/**
+	 * Set the moment the user (or anything else) stopped the turn while it ran: what it was doing (a tool's activity,
+	 * `thinking`, `writing`, `working`), when, and for how long that had run. The turn keeps what it did.
+	 */
+	stopped?: { label: string; at: number; ms: number; tool: boolean };
 	/** Finished calls of tools that may change something, in order. */
 	steps: Step[];
 	relays?: Relay[];
@@ -184,6 +194,8 @@ export class AsideThread {
 	unfinished = false;
 	private idleWaiters: Array<() => void> = [];
 	private pauseRequested = false;
+	/** Set when a turn was stopped: the next question opens with it. */
+	private stoppedNote: string | undefined;
 	waitForIdle(): Promise<void> {
 		if (!this.busy) return Promise.resolve();
 		this.pauseRequested = true;
@@ -213,7 +225,18 @@ export class AsideThread {
 		return turn ? parseReply(turn.raw, turn.done) : undefined;
 	}
 
+	/**
+	 * Stop the turn in progress at once. What it did stays in the thread: finished tool calls with their results, the
+	 * stopped call with what it printed so far, and the text it wrote. The next question continues after it.
+	 */
 	abort(): void {
+		const turn = this.current;
+		if (this.controller && turn && !turn.done && !turn.stopped) {
+			const at = Date.now();
+			const tool = !!turn.activity;
+			const label = turn.activity ?? (parseReply(turn.raw, false).body ? "writing" : turn.thinking?.trim() ? "thinking" : "working");
+			turn.stopped = { label, at, ms: at - (tool ? (turn.activitySince ?? turn.startedAt) : turn.startedAt), tool };
+		}
 		this.controller?.abort();
 	}
 
@@ -228,9 +251,13 @@ export class AsideThread {
 	private quotedExchange(): string {
 		const parts: string[] = [];
 		for (const turn of this.turns.slice(0, -1)) {
-			if (turn.aborted || turn.error) continue;
 			const reply = parseReply(turn.raw, true);
-			parts.push(`Q: ${turn.question}\nA: ${reply.body}`);
+			// Not what went to the agent instead, nor what failed.
+			if (turn.retracted || turn.error || reply.route === "agent" || (turn.aborted && !turn.stopped)) continue;
+			const steps = turn.steps.map((step) => `${step.ok ? "✓" : "✗"} ${step.label}`);
+			if (turn.stopped) steps.push(`■ ${turn.stopped.label} (stopped by the user)`);
+			const body = [...steps, reply.body].filter(Boolean).join("\n");
+			parts.push(`Q: ${turn.question}\nA: ${body}${turn.stopped && !turn.stopped.tool ? "\n(stopped by the user before it finished)" : ""}`);
 		}
 		return parts.length > 0 ? `Earlier in this side conversation:\n\n${parts.join("\n\n")}\n\n` : "";
 	}
@@ -240,6 +267,8 @@ export class AsideThread {
 		this.controller?.abort();
 		this.pauseRequested = false;
 		this.unfinished = false;
+		const note = this.stoppedNote;
+		this.stoppedNote = undefined;
 		const turn: TurnView = { question, raw: "", done: false, steps: [], startedAt: Date.now(), cost: 0, read: 0, written: 0 };
 		this.turns.push(turn);
 		const controller = new AbortController();
@@ -248,6 +277,10 @@ export class AsideThread {
 		const update = () => {
 			if (this.controller === controller || turn.done) this.host.onUpdate();
 		};
+		/** The request messages of this turn so far: kept in the thread when the turn completes or is stopped. */
+		let added: Any[] | undefined;
+		/** The tool call running when the turn was stopped, and what it returned within the grace period. */
+		let stoppedCall: { call: Any; outcome?: Any } | undefined;
 		let routeReported = false;
 		const reportRoute = (complete = turn.done) => {
 			if (signal.aborted || turn.aborted || routeReported || !options.onRoute) return;
@@ -262,6 +295,7 @@ export class AsideThread {
 			if (this.mainMoved()) {
 				if (this.fork) prefix = this.quotedExchange();
 				turn.activity = "waiting for the main request";
+				turn.activitySince = Date.now();
 				update();
 				await this.host.observer.settle(signal);
 				if (signal.aborted) throw new DOMException("aborted", "AbortError");
@@ -283,18 +317,18 @@ export class AsideThread {
 			turn.predicted = fork.observation?.cacheablePrefix;
 			const q = {
 				role: "user",
-				content: [{ type: "text", text: `${notice(options)}\n\n${prefix}${question}` }],
+				content: [{ type: "text", text: `${notice(options)}\n\n${prefix}${note ? `${note}\n\n` : ""}${question}` }],
 				timestamp: Date.now(),
 			};
 			// The aside declares no tools of its own: added declarations would change the request's tool list on providers
 			// without inline tool additions, and the main session's cache would not apply. Actions are reply lines.
-			const added: unknown[] = [q];
+			added = [q];
 			this.history.push({ role: "user", content: question, timestamp: Date.now() });
 			let summary = false;
 			let textBefore = "";
 			for (let round = 0; ; round++) {
 				signal.throwIfAborted();
-				const result: SendResult = await send(this.host.env, fork, [...this.exchange, ...added], signal, (event: Any) => {
+				const result: SendResult = await send(this.host.env, fork, [...this.exchange, ...added!], signal, (event: Any) => {
 					if (!signal.aborted && event?.partial) {
 						turn.raw = textBefore + textOf(event.partial);
 						turn.thinking = thinkingOf(event.partial) || undefined;
@@ -353,11 +387,18 @@ export class AsideThread {
 						continue;
 					}
 					turn.activity = activityFor(call);
+					turn.activitySince = Date.now();
 					update();
 					signal.throwIfAborted();
 					const skippedForFollowup = this.pauseRequested;
-					const outcome = await this.runTool(call, signal, turn);
-					if (signal.aborted) throw new DOMException("aborted", "AbortError");
+					const running: { call: Any; outcome?: Any } = { call };
+					stoppedCall = running;
+					const outcome = await this.stoppable(this.runTool(call, signal, turn), signal);
+					if (signal.aborted) {
+						running.outcome = outcome;
+						throw new DOMException("aborted", "AbortError");
+					}
+					stoppedCall = undefined;
 					if (!skippedForFollowup && !isReading(call.name)) turn.steps.push({ label: activityFor(call), ok: !outcome.isError });
 					added.push(outcome);
 					this.history.push(outcome);
@@ -369,6 +410,7 @@ export class AsideThread {
 			}
 			signal.throwIfAborted();
 			this.exchange.push(...added);
+			added = undefined;
 			if (summary && !parseReply(turn.raw, true).next) {
 				const parsed = parseReply(turn.raw, true);
 				turn.raw = `route: ${parsed.route ?? "side"}\n${parsed.body}\nnext: continue`;
@@ -380,6 +422,8 @@ export class AsideThread {
 		} catch (error) {
 			if (signal.aborted || (error instanceof DOMException && error.name === "AbortError")) {
 				turn.aborted = true;
+				// Not when a newer question replaced this one mid-flight: its request is already out without this turn.
+				if (added && this.controller === controller) this.keepStopped(added, stoppedCall, turn);
 			} else {
 				turn.error = error instanceof Error ? error.message : String(error);
 			}
@@ -414,6 +458,66 @@ export class AsideThread {
 			}
 		}
 		if (parsed.move && this.host.moveOut && !this.promotion) this.promotion = parsed.move;
+	}
+
+	/** The stopped turn's work goes into the thread, so that the next question continues after it (and reads its cache). */
+	private keepStopped(added: Any[], stoppedCall: { call: Any; outcome?: Any } | undefined, turn: TurnView): void {
+		const kept: Any[] = [];
+		for (const message of added) {
+			if (message?.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error")) {
+				// A reply cut off while streaming: its text stays; its thinking and unfinished tool calls go.
+				const text = textOf(message);
+				const index = this.history.indexOf(message);
+				const clean = text.trim() ? { ...message, content: [{ type: "text", text }], stopReason: "stop" } : undefined;
+				if (index >= 0) clean ? this.history.splice(index, 1, clean) : this.history.splice(index, 1);
+				if (clean) kept.push(clean);
+				continue;
+			}
+			kept.push(message);
+		}
+		// Every tool call of the last reply gets its result: the stopped one with what it printed, the rest not run.
+		const answered = new Set(kept.filter((m) => m?.role === "toolResult").map((m) => m.toolCallId));
+		let last: Any;
+		for (const message of kept) if (message?.role === "assistant") last = message;
+		for (const call of (last?.content ?? []).filter((c: Any) => c?.type === "toolCall")) {
+			if (answered.has(call.id)) continue;
+			let result: Any;
+			if (stoppedCall && stoppedCall.call.id === call.id) {
+				const printed = (stoppedCall.outcome?.content ?? [])
+					.map((c: Any) => (c?.type === "text" ? c.text : ""))
+					.join("")
+					.trim();
+				const seconds = Math.round((turn.stopped?.ms ?? 0) / 1000);
+				const stop = `Stopped by the user after ${seconds}s, before it finished.`;
+				result = toolResult(call, printed && !/^(this operation was aborted|aborted)\.?$/i.test(printed) ? `${printed}\n\n${stop}` : stop, true);
+			} else {
+				result = toolResult(call, "Not run: the user stopped the aside.", true);
+			}
+			kept.push(result);
+			this.history.push(result);
+		}
+		this.exchange.push(...kept);
+		this.stoppedNote = STOPPED_NOTE;
+	}
+
+	/** A tool call that the stop ends at once: it has STOP_GRACE_MS to return what it did so far. */
+	private async stoppable<T>(work: Promise<T>, signal: AbortSignal): Promise<T | undefined> {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		let onAbort: (() => void) | undefined;
+		const stopped = new Promise<undefined>((resolve) => {
+			onAbort = () => {
+				timer = setTimeout(() => resolve(undefined), STOP_GRACE_MS);
+				timer.unref?.();
+			};
+			if (signal.aborted) onAbort();
+			else signal.addEventListener("abort", onAbort, { once: true });
+		});
+		try {
+			return await Promise.race([work, stopped]);
+		} finally {
+			if (onAbort) signal.removeEventListener("abort", onAbort);
+			if (timer) clearTimeout(timer);
+		}
 	}
 
 	private async runTool(call: Any, signal: AbortSignal, turn: TurnView): Promise<Any> {

@@ -3,6 +3,7 @@ import { BackgroundWork } from "../src/busy.ts";
 import { asideLevel, STILL_RUNNING, withPlaceholders } from "../src/fork.ts";
 import { Observer, type Recipe } from "../src/observe.ts";
 import {
+	AGENT_NOTE,
 	CLOSE_MARK,
 	closeZone,
 	FOLLOW_HINT,
@@ -377,10 +378,16 @@ describe("panel", () => {
 	test("before the first words: a spinner and the time, then the model's thinking", () => {
 		const md = (text: string) => text.split("\n");
 		expect(progressLines(turn() as never, 40, theme, md, 1_500)).toEqual([`${f(1_500)} working`]);
-		expect(progressLines(turn() as never, 40, theme, md, 4_200)).toEqual([`${f(4_200)} working · 3s`]);
+		// The time sits on the right edge.
+		expect(progressLines(turn() as never, 40, theme, md, 4_200)).toEqual([`${`${f(4_200)} working`.padEnd(38)}3s`]);
 		const thinking = progressLines(turn({ thinking: "one\ntwo\nthree\nfour" }) as never, 40, theme, md, 3_000);
-		expect(thinking).toEqual([`${f(3_000)} thinking · 2s`, "  two", "  three", "  four"]);
+		expect(thinking).toEqual([`${`${f(3_000)} thinking`.padEnd(38)}2s`, "  two", "  three", "  four"]);
 		expect(progressLines(turn({ activity: "reading a.ts" }) as never, 40, theme, md, 1_000)).toEqual([`${f(1_000)} reading a.ts`]);
+		// A tool's line counts its own time, not the question's.
+		const tool = progressLines(turn({ activity: "$ bun run build", activitySince: 2_000 }) as never, 40, theme, md, 43_500);
+		expect(tool).toEqual([`${`${f(43_500)} $ bun run build`.padEnd(37)}41s`]);
+		// Too narrow for both: the time goes, the step stays.
+		expect(progressLines(turn({ activity: "$ bun run build", activitySince: 2_000 }) as never, 12, theme, md, 43_500)[0]).not.toContain("41s");
 	});
 
 	test("the frame: spinner in the title while running, the close mark on the top edge where Pi reports the mouse", () => {
@@ -388,7 +395,8 @@ describe("panel", () => {
 		expect(waiting[0]).not.toContain(f(1_000));
 		expect(waiting[0]).not.toContain(CLOSE_MARK);
 		expect(waiting[1]).toContain(`${f(1_000)} working`);
-		expect(waiting.at(-1)).toBe(`╰${"─".repeat(38)}╯`);
+		// The bottom edge says what Esc does: it stops the aside while it runs.
+		expect(waiting.at(-1)).toBe(`╰─ esc stop ${"─".repeat(27)}╯`);
 		const running = renderPanel(state({ mouse: true }, { raw: "route: side\nBecause" }), 40, theme, undefined, 1_000);
 		expect(running[0]).toContain(`${f(1_000)} why B?`);
 		expect(running.join("\n")).not.toContain("working");
@@ -400,6 +408,7 @@ describe("panel", () => {
 		const [from, to] = closeZone(40);
 		expect(from <= 36 && 36 <= to && to <= 39).toBe(true);
 		expect(done.join("\n")).toContain("Because.");
+		expect(done.at(-1)).toBe(`╰─ esc close ${"─".repeat(26)}╯`);
 		for (const line of [...waiting, ...running, ...done]) expect(line.length).toBe(40);
 		// A long question leaves the close mark in place.
 		const long = renderPanel(state({ mouse: true }, { question: "why ".repeat(30), done: true, raw: "ok" }), 40, theme);
@@ -424,6 +433,46 @@ describe("panel", () => {
 			1_000,
 		);
 		expect(running).toEqual(["✓ $ du -sh ~/.cache", `${f(1_000)} $ rm -rf ~/.cache/pip`]);
+	});
+
+	test("stopped: the panel stays, with what was done, where it stopped, and how to go on", () => {
+		const stopped = { label: "$ bun run build --profile", at: 50_000, ms: 41_000, tool: true };
+		const steps = [{ label: "$ du -sh ~/.cache", ok: true }];
+		const t = { done: true, aborted: true, stopped, steps, raw: "route: side\nChecking the cache first." };
+		const lines = renderPanel(state({ maxLines: 12, continueKey: "?" }, t), 50, theme, undefined, 60_000);
+		expect(lines.slice(1, -1).map((line) => line.slice(2, -2).trimEnd())).toEqual([
+			"✓ $ du -sh ~/.cache",
+			"Checking the cache first.",
+			`${"■ $ bun run build --profile".padEnd(33)}stopped · 41s`,
+		]);
+		expect(lines[0]).not.toContain(f(60_000));
+		expect(lines.at(-1)).toBe(`╰─ ? continue · esc close ${"─".repeat(23)}╯`);
+		// While the agent is idle a `?` message goes to the agent: `/aside` continues instead.
+		expect(renderPanel(state({ maxLines: 12, continueKey: "/aside" }, t), 50, theme).at(-1)).toContain("/aside continue · esc close");
+		// At once: a stopped tool may still be returning what it printed, and the panel already says stopped.
+		const settling = renderPanel(state({ maxLines: 12 }, { ...t, done: false, aborted: undefined, activity: stopped.label }), 50, theme, undefined, 60_000);
+		expect(settling.join("\n")).toContain("stopped · 41s");
+		expect(settling.join("\n")).not.toContain(f(60_000));
+		for (const line of [...lines, ...settling]) expect(line.length).toBe(50);
+	});
+
+	test("colors: the lit edge while it runs, green ✓, ■ and stopped in warning, thinking in Pi's thinking color", () => {
+		const tagged = { fg: (c: string, s: string) => `<${c}>${s}</${c}>` };
+		const running = renderPanel(state({ maxLines: 12 }, { activity: "$ make", steps: [{ label: "$ ls", ok: true }, { label: "write x", ok: false }], raw: "route: side\n" }), 200, tagged, undefined, 1_000);
+		expect(running[0]).toContain("<borderAccent>╭─</borderAccent>");
+		expect(running.join("\n")).toContain("<success>✓</success> <dim>$ ls</dim>");
+		expect(running.join("\n")).toContain("<error>✗ write x</error>");
+		expect(running.join("\n")).toContain("<text>$ make</text>");
+		expect(running.at(-1)).toContain("<dim>esc</dim> <muted>stop</muted>");
+		const stopped = renderPanel(state({ maxLines: 12 }, { done: true, aborted: true, stopped: { label: "thinking", at: 0, ms: 3_000, tool: false }, raw: "" }), 200, tagged);
+		expect(stopped[0]).toContain("<borderMuted>╭─</borderMuted>");
+		expect(stopped.join("\n")).toContain("<warning>■</warning> <dim>thinking</dim>");
+		expect(stopped.join("\n")).toContain("<warning>stopped · 3s</warning>");
+	});
+
+	test("below the editor after a stop while the agent runs: Esc is still the aside's", () => {
+		expect(renderBelow({ hint: undefined, next: undefined, agent: true }, 100, theme)).toEqual([AGENT_NOTE]);
+		expect(renderBelow({ hint: "undo", next: undefined, agent: true }, 100, theme)).toEqual(["↑↵ sends it to the agent instead", AGENT_NOTE]);
 	});
 
 	test("the panel grows with its answer up to its room: half the screen while the agent runs, else above the editor", () => {

@@ -100,8 +100,17 @@ after 3.8 s at the main level and after 1.7–1.9 s at `low`; the cache read was
 
 - Before the first words, Pi's spinner shows `working` and elapsed seconds. Thinking shows its last three lines,
   dim and italic. Answers and the reader use Pi's Markdown component and theme.
-- Esc closes the panel and aborts the aside's controller, never the main agent. No folded line remains. A second
-  Esc within 500 ms is consumed; after that interval it keeps Pi's normal meaning. Dialogs and autocomplete keep
+- Esc while the panel shows the aside at work aborts the aside's controller, never the main agent, and leaves
+  the panel open. `AsideThread.abort()` records `turn.stopped` (what ran, when, for how long) at once, so the
+  panel settles before the tool returns. The tool gets `STOP_GRACE_MS` (1 s) to return what it printed; the
+  executor passes a cancelled call's result on as a failure. On the abort the turn's request messages go into
+  the thread's exchange: finished calls with results, the stopped call with its output and `Stopped by the user
+  after Ns`, `Not run: the user stopped the aside.` for the rest, and a reply cut off while streaming as a
+  text-only assistant message (Pi's providers drop aborted messages). The next question opens with
+  `STOPPED_NOTE`; a re-fork quotes a stopped turn with its steps. Esc on a settled panel closes it. No folded
+  line remains. An Esc within 500 ms of one the aside took is consumed: after a stop it does not close, after a
+  close it does not stop the agent. Pi's working message (`setWorkingMessage`) and `aside:esc` on `pi.events`
+  follow what Esc does; closing restores Pi's default. Dialogs and autocomplete keep
   their Esc. A request generation and thread/session ownership guards discard late route callbacks and suggestions
   from cancelled or replaced work.
 - A close mark and count-line targets work through `handleMouse` in fullscreen mode. A wheel over the panel
@@ -295,9 +304,10 @@ machine's models.json, which has no prices for its provider.
 
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, 199 tests)
+### 3.1 Offline (`bun run check`, 205 tests)
 
-Final 0.6.1 check: TypeScript passed; **199 tests passed, 0 failed, 921 assertions**, across 9 files in 69.70 s.
+Final 0.7.0 check: TypeScript passed; **205 tests passed, 0 failed, 981 assertions**, across 9 files in 76.29 s.
+(0.6.1: 199 tests, 921 assertions, 9 files.)
 (0.6.0: 189 tests, 875 assertions, 8 files.)
 (0.5.0: 169 tests, 731 assertions, 7 files.)
 
@@ -315,6 +325,7 @@ interaction, in a private tmux server. Nothing touches `~/.pi` or the network.
 | TUI | Busy `?` routing and hints, CJK punctuation, normal steers and idle prompts, Esc closing only the aside and guarding double presses, cancelling a running aside, Enter and agent sends leaving the panel open, next-step suggestions, direct relay, route fallback, bracketed paste, background work, spinner/thinking, Markdown, long answers and ctrl+o, typing in the reader, panel wheel/touch targets, reader wheel and close, fresh versus follow-up threads, and route-before-tool behavior. |
 | 0.6.0 | ↑ ↵ while the aside answers (the hint, the stop, the steer with the user's text, no second aside request); recalled after Esc and edited; sent once; typing the same question again and browsing past it in the history stay on the side; a tap on ↪; `forward:` sends the previous question verbatim. Units: the `forward:` line, the notice, both hints, the panel after a send, the forward mark's place and tap zone, the two-minute window. Mutation checks: disabling the take-back or its input branch fails the key-replay tests. |
 | 0.6.1 | Real Pi over RPC: two main turns, `compact` (two summary requests), an aside. The aside is exact, extends the pre-compaction request, and has no summary in it; the main session's next request starts from the summary. Units: kept while warm (5 minutes less 30 s), renewed by aside requests, dropped when cold, after an overflow or while a request is open, replaced by the next main request; the lifetime from 1-hour and 24-hour markers; G without compaction entries; the detail line's first request, totals and missing prices; the money line by the first request. Mutation checks: the old reset on compaction fails the RPC test (`rebuilt`), and G with compaction entries puts the summary in the aside. |
+| 0.7.0 | Thread replay: a stop during a tool keeps the finished call, the stopped call's output with `Stopped by the user after Ns`, and `Not run` for the rest; the follow-up opens with the stop note, and the first request's messages are a prefix of the next one's (cache markers aside). A tool that ignores the stop ends the turn within the 1 s grace. A reply cut off while streaming stays as text. Key replay: Esc stops while the agent runs a tool, the panel stays with `■ … stopped`, `? continue · esc close`, the note below the editor and Pi's working line; `?` continues after it; the next Esc closes; only then Esc stops the agent. Idle: `/aside continue · esc close` and the reader's `(stopped while working)`. Panel units: right-edge times, the stopped line, the bottom edge, theme tokens. |
 | 0.5.0 | Hidden/sanitized next suggestions and Tab to `/aside`; no-main-tools relay; queued-to-read TUI status; parent inbox and child main-agent relay; response-24 summary and fresh continuation; SessionManager round-trip, discovery, pending main tools and protocol stripping; safe tmux command/name construction; move waits for a tool and skips later calls; non-tmux command fallback; count text and expanded close touch zones. |
 | Effort | On models with mid-conversation effort, the aside's E carries `low` and everything else matches the main request (Anthropic and Responses); other models keep the main level. |
 | Units | The text rules (71 gate cases), strip, lists, C1–C3, the observer state machine, the usage queue, background work, placeholders, the notice, money, the panel room and count line, the claim on ctrl+o, the reader's keys. |

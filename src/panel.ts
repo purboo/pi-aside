@@ -34,6 +34,8 @@ export const FOLLOW_HINT = "↵ follows up on the side · corrections still reac
 export const UNDO_HINT = "↑↵ sends it to the agent instead";
 /** The editor holds that message again (recalled with ↑ or typed again): Enter sends it to the agent (docs/ux.md §3.4). */
 export const BACK_HINT = "↵ sends to the agent · it was asked on the side";
+/** Below the editor after a stop while the agent runs: Esc is still the aside's, and how to reach the agent. */
+export const AGENT_NOTE = "the agent is still running \u00b7 esc closes the aside, then esc stops the agent";
 /** The close mark on the panel's top edge, where a click or a tap closes it (shown where Pi reports the mouse). */
 export const CLOSE_MARK = "✕";
 /** Beside the close mark: a click or a tap sends the question to the agent instead (where Pi reports the mouse). */
@@ -66,6 +68,8 @@ export interface PanelState {
 	sentToAgent?: { text: string; waiting: boolean; byUser?: boolean };
 	/** The latest question can still go to the agent instead: the title shows the forward mark where Pi reports the mouse. */
 	forwardable?: boolean;
+	/** What continues a stopped aside, for the bottom edge: `?` while the agent is busy, `/aside` otherwise. */
+	continueKey?: string;
 }
 
 /** Markdown to terminal lines; `thinking` text is rendered dim and italic. */
@@ -124,9 +128,18 @@ export function detailLine(turn: TurnView, threshold = MONEY_THRESHOLD): string 
 	return parts.join(" · ");
 }
 
-function elapsed(turn: TurnView, now: number): string {
-	const seconds = Math.floor((now - turn.startedAt) / 1000);
-	return seconds >= 1 ? ` · ${seconds}s` : "";
+/** Whole seconds, from the first one on. */
+function seconds(ms: number): string {
+	const s = Math.floor(ms / 1000);
+	return s >= 1 ? `${s}s` : "";
+}
+
+/** `left`, and `right` flush with the right edge. Where both do not fit, `left` is cut, but not below 16 columns. */
+export function spread(left: string, right: string, width: number): string {
+	const r = visibleWidth(right);
+	if (r === 0 || width - r - 2 < Math.min(visibleWidth(left), 16)) return truncateToWidth(left, width, "\u2026");
+	const l = truncateToWidth(left, width - r - 2, "\u2026");
+	return `${l}${" ".repeat(Math.max(2, width - visibleWidth(l) - r))}${right}`;
 }
 
 /** The end of a long thinking text, cut at a paragraph or line start so that its Markdown stays whole. */
@@ -145,18 +158,26 @@ function thinkingTail(text: string): string {
 export function progressLines(turn: TurnView, width: number, theme: Theme, md: MarkdownRenderer, now: number): string[] {
 	const spin = theme.fg("accent", spinnerFrame(now));
 	const dim = (s: string) => theme.fg("dim", s);
-	if (turn.activity) return [`${spin} ${dim(truncateToWidth(`${turn.activity}${elapsed(turn, now)}`, Math.max(4, width - 2), "…"))}`];
+	// The live step reads in the text color, with its own time on the right.
+	if (turn.activity) return [spread(`${spin} ${theme.fg("text", turn.activity)}`, dim(seconds(now - (turn.activitySince ?? turn.startedAt))), width)];
+	const time = dim(seconds(now - turn.startedAt));
 	if (turn.thinking?.trim()) {
 		const tail = md(thinkingTail(turn.thinking), Math.max(10, width - 2), "thinking").filter((line) => line.trim() !== "");
-		return [`${spin} ${dim(`thinking${elapsed(turn, now)}`)}`, ...tail.slice(-THINKING_LINES).map((line) => `  ${line}`)];
+		return [spread(`${spin} ${dim("thinking")}`, time, width), ...tail.slice(-THINKING_LINES).map((line) => `  ${line}`)];
 	}
-	return [`${spin} ${dim(`working${elapsed(turn, now)}`)}`];
+	return [spread(`${spin} ${dim("working")}`, time, width)];
 }
 
-/** What the aside did (its finished bash, edit and write calls), one dim line each. */
+/** Where a stopped turn was: what it was doing, in warning, and for how long it had run. */
+export function stoppedLine(stopped: NonNullable<TurnView["stopped"]>, width: number, theme: Theme): string {
+	const time = seconds(stopped.ms);
+	return spread(`${theme.fg("warning", "\u25a0")} ${theme.fg("dim", stopped.label)}`, theme.fg("warning", `stopped${time ? ` \u00b7 ${time}` : ""}`), width);
+}
+
+/** What the aside did (its finished bash, edit and write calls), one line each: a green ✓, or the whole line red. */
 export function stepLines(turn: TurnView, width: number, theme: Theme): string[] {
 	return (turn.steps ?? []).map((step) =>
-		truncateToWidth(step.ok ? theme.fg("dim", `✓ ${step.label}`) : theme.fg("error", `✗ ${step.label}`), width, "…"),
+		truncateToWidth(step.ok ? `${theme.fg("success", "✓")} ${theme.fg("dim", step.label)}` : theme.fg("error", `✗ ${step.label}`), width, "…"),
 	);
 }
 
@@ -221,6 +242,10 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 	const body = [...stepLines(turn, width, theme), ...relays, ...forwarded, ...(parsed.body ? md(parsed.body, width) : [])];
 	if (sent) {
 		tail.push(dim("↪ sent to the agent"));
+	} else if (turn.stopped) {
+		// At once, even while a stopped tool still has a moment to return what it printed.
+		tail.push(stoppedLine(turn.stopped, width, theme));
+		if (turn.error) tail.push(theme.fg("error", truncateToWidth(`aside failed: ${turn.error.replace(/\s+/g, " ").trim()}`, width, "…")));
 	} else if (!turn.done) {
 		if (turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
 	} else {
@@ -281,9 +306,11 @@ export function forwardZone(width: number): [number, number] {
 export function panelView(state: PanelState, width: number, theme: Theme, md: MarkdownRenderer = plainText, now = Date.now()): PanelView {
 	const turn = state.turns.at(-1);
 	if (!turn || state.hidden) return { lines: [] };
-	const border = (s: string) => theme.fg("borderMuted", s);
 	const question = turn.question.replace(/\s+/g, " ");
-	const running = !turn.done && !state.sentToAgent;
+	const running = !turn.done && !turn.stopped && !state.sentToAgent;
+	// The lit edge is what Esc acts on: it stops the aside while it runs, and closes the panel once it settles.
+	const tone = running ? "borderAccent" : "borderMuted";
+	const border = (s: string) => theme.fg(tone, s);
 	const inner = Math.max(10, width - 4);
 	// The spinner sits in the title while the answer streams, and on the progress line before it (never both).
 	const progress = !!turn.activity || parseReply(turn.raw, turn.done).body === "";
@@ -303,8 +330,16 @@ export function panelView(state: PanelState, width: number, theme: Theme, md: Ma
 		const text = truncateToWidth(line.replace(/\s+$/u, ""), inner);
 		out.push(`${border("│")} ${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))} ${border("│")}`);
 	}
-	out.push(border(`╰${"─".repeat(Math.max(0, width - 2))}╯`));
+	out.push(bottomEdge(running ? [["esc", "stop"]] : turn.stopped && !state.sentToAgent ? [[state.continueKey ?? "?", "continue"], ["esc", "close"]] : [["esc", "close"]], width, theme, border));
 	return { lines: out, more: body.more, readerRows: body.readerRows?.map((row) => row + 1), readerZones: body.readerRows?.map(row => ({ row: row + 1, from: 2, to: Math.min(width - 3, 1 + visibleWidth(body.lines[row]!)) })), scroll: body.scroll, ...(forward ? { forward } : {}) };
+}
+
+/** The bottom edge, with what the keys do now: `╰─ esc stop ───╯`. A narrow panel keeps a plain edge. */
+function bottomEdge(keys: Array<[string, string]>, width: number, theme: Theme, border: (s: string) => string): string {
+	const text = keys.map(([key, what]) => `${theme.fg("dim", key)} ${theme.fg("muted", what)}`).join(theme.fg("dim", " \u00b7 "));
+	const used = visibleWidth(text) + 5;
+	if (keys.length === 0 || used + 2 > width) return border(`╰${"─".repeat(Math.max(0, width - 2))}╯`);
+	return `${border("╰─ ")}${text}${border(` ${"─".repeat(width - used)}╯`)}`;
 }
 
 /**
@@ -317,10 +352,11 @@ export type HintKind = "ask" | "follow" | "back" | "undo" | undefined;
 const HINTS: Record<Exclude<HintKind, undefined>, string> = { ask: HINT, follow: FOLLOW_HINT, back: BACK_HINT, undo: UNDO_HINT };
 
 /** Below the editor: the hint before an Enter that asks on the side, or the next-step placeholder. */
-export function renderBelow(input: { hint: HintKind | boolean; next: string | undefined }, width: number, theme: Theme): string[] {
+export function renderBelow(input: { hint: HintKind | boolean; next: string | undefined; agent?: boolean }, width: number, theme: Theme): string[] {
 	const lines: string[] = [];
 	if (input.next) lines.push(truncateToWidth(theme.fg("dim", `/aside ${input.next}`), width));
 	if (input.hint) lines.push(truncateToWidth(theme.fg("dim", typeof input.hint === "string" ? HINTS[input.hint] : HINT), width));
+	if (input.agent) lines.push(truncateToWidth(theme.fg("muted", AGENT_NOTE), width));
 	return lines;
 }
 

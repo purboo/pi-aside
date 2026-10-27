@@ -41,8 +41,14 @@ const BELOW_WIDGET = "pi-aside-below";
 const STATUS_KEY = "pi-aside";
 const SIDE_NOTE_TYPE = "aside";
 const REBUILT_NOTICE_AFTER = 3;
-/** After Esc closes the panel, a second Esc this soon is a double press or a key repeat, not "stop the agent". */
+/**
+ * After an Esc the aside took (a stop, a close), another this soon is a double press or a key repeat: it does nothing,
+ * so that a held or doubled Esc never goes on to close the panel or to stop the agent.
+ */
 export const ESC_GUARD_MS = 500;
+/** Pi's working line while the panel is open, by what Esc does to the aside (Pi's default otherwise). */
+export const WORKING_STOP = "Working · esc stops the aside first";
+export const WORKING_CLOSE = "Working · esc closes the aside first";
 const HISTORY_KEYS = ["tui.editor.cursorUp", "tui.editor.cursorDown", "tui.editor.historyPrevious", "tui.editor.historyNext"];
 
 /** Pi's Markdown component with Pi's Markdown theme; the last few renders are kept (the spinner redraws often). */
@@ -54,7 +60,7 @@ function markdownRenderer(theme: Any): MarkdownRenderer {
 		if (hit) return hit;
 		let lines: string[];
 		try {
-			const textStyle = style === "thinking" ? { color: (s: string) => theme.fg("dim", s), italic: true } : undefined;
+			const textStyle = style === "thinking" ? { color: (s: string) => theme.fg("thinkingText", s), italic: true } : undefined;
 			lines = new Markdown(text, 0, 0, getMarkdownTheme(), textStyle).render(Math.max(10, width)).map((line) => line.replace(/\s+$/u, ""));
 			while (lines.length > 0 && lines.at(-1) === "") lines.pop();
 			while (lines.length > 0 && lines[0] === "") lines.shift();
@@ -78,8 +84,11 @@ export default function piAside(pi: ExtensionAPI): void {
 	/** The panel's last render: what Pi's "more" key and the mouse do while it is on screen. */
 	let panelLast: PanelView = { lines: [] };
 	let panelMore: MoreAction | undefined;
-	/** When Esc last closed the panel (ESC_GUARD_MS). */
-	let closedAt = 0;
+	/** When the aside last took an Esc, and what it did: a stop, or a close of the panel or the reader (ESC_GUARD_MS). */
+	let escAt = 0;
+	let escDid: "stop" | "close" = "close";
+	/** What Esc does to the aside now, as last told to Pi's working line and to `aside:esc` listeners. */
+	let escShown: "stop" | "close" | undefined;
 	/** Invalidates callbacks and completions from a stopped or replaced aside. */
 	let askSeq = 0;
 	let belowShown = false;
@@ -198,7 +207,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	function resetSession(ctx: ExtensionContext | undefined): void {
 		closeInboxes(); relays.clear();
 		askSeq++;
-		closedAt = 0;
+		escAt = 0;
 		thread?.abort();
 		thread = undefined;
 		forgetRetractable();
@@ -378,7 +387,8 @@ export default function piAside(pi: ExtensionAPI): void {
 	/** Whether the hint below an empty editor offers ↑ ↵: the retractable message is in the open panel, still answered. */
 	function undoable(): boolean {
 		const r = retractable;
-		return !!r && r.thread === thread && !panel.hidden && !panel.sentToAgent && panel.turns.at(-1) === r.turn && !r.turn.done;
+		// Also once stopped: an Esc right after the `?` rule took a message aside often meant "no, that was for the agent".
+		return !!r && r.thread === thread && !panel.hidden && !panel.sentToAgent && panel.turns.at(-1) === r.turn && (!r.turn.done || !!r.turn.stopped);
 	}
 
 	function deliver(message: string, name = "aside"): Relay {
@@ -677,11 +687,14 @@ export default function piAside(pi: ExtensionAPI): void {
 			const parsed = parseReply(turn.raw, turn.done);
 			let answer = parsed.body;
 			if (turn.error) answer += `${answer ? "\n\n" : ""}aside failed: ${turn.error}`;
+			const stoppedAfter = turn.stopped && turn.stopped.ms >= 1000 ? ` after ${Math.floor(turn.stopped.ms / 1000)}s` : "";
 			if (turn.retracted) answer += `${answer ? "\n\n" : ""}↪ sent to the agent`;
-			else if (turn.aborted) answer += `${answer ? "\n\n" : ""}(stopped)`;
+			else if (turn.stopped && !turn.stopped.tool) answer += `${answer ? "\n\n" : ""}(stopped while ${turn.stopped.label}${stoppedAfter})`;
+			else if (turn.aborted && !turn.stopped) answer += `${answer ? "\n\n" : ""}(stopped)`;
 			for (const relay of turn.relays ?? []) answer += `\n\n→ to the agent\n${relay.message}\n${relay.read ? "It has read this." : "It will see this after its current step."}`;
 			if (turn.forwarded !== undefined) answer += `\n\n↪ sent to the agent\n${turn.forwarded}`;
 			const steps = turn.steps.map((step) => `${step.ok ? "✓" : "✗"} ${step.label}`);
+			if (turn.stopped?.tool && !turn.retracted) steps.push(`■ ${turn.stopped.label} · stopped${stoppedAfter}`);
 			const hash = thread?.fork?.pHash ? ` · p ${thread.fork.pHash.slice(0, 12)}` : "";
 			return { question: turn.question, answer, detail: `${detail(turn)}${hash}`, steps };
 		});
@@ -706,7 +719,8 @@ export default function piAside(pi: ExtensionAPI): void {
 					readerTurns,
 					theme,
 					() => {
-						closedAt = Date.now();
+						escAt = Date.now();
+						escDid = "close";
 						done(undefined);
 					},
 					() => tui.requestRender(),
@@ -724,6 +738,7 @@ export default function piAside(pi: ExtensionAPI): void {
 	function renderNow(): void {
 		if (ctxRef?.mode !== "tui") return;
 		showPanel(panel.turns.length > 0 && !panel.hidden);
+		syncEsc();
 		animate();
 		try {
 			tuiRef?.requestRender();
@@ -735,7 +750,41 @@ export default function piAside(pi: ExtensionAPI): void {
 	/** Whether the panel shows an answer still running (its spinner turns). */
 	function spinning(): boolean {
 		const turn = panel.turns.at(-1);
-		return !!turn && !turn.done && !panel.hidden && !panel.sentToAgent;
+		return !!turn && !turn.done && !turn.stopped && !panel.hidden && !panel.sentToAgent;
+	}
+
+	/** Whether the open panel shows the aside at work: Esc then stops it, and leaves the panel open. */
+	function asideRunning(): boolean {
+		return panelOpen() && !!thread?.busy && panel.turns === thread.turns && spinning();
+	}
+
+	/**
+	 * Stop the aside at once (docs/ux.md §3.2): the panel stays with what it did, and the next question continues the
+	 * thread after it. The main agent keeps going.
+	 */
+	function stopAside(): void {
+		thread?.abort();
+		suggestion = undefined;
+		renderNow();
+		refreshBelow();
+	}
+
+	/**
+	 * Say what Esc does while the panel is open: in Pi's working line, and to other extensions as `aside:esc`
+	 * (`{ action: "stop" | "close" | undefined }`) for those that show their own interrupt hint.
+	 */
+	function syncEsc(): void {
+		const ctx = ctxRef;
+		if (!ctx || ctx.mode !== "tui") return;
+		const action = panelOpen() ? (asideRunning() ? "stop" : "close") : undefined;
+		if (action === escShown) return;
+		escShown = action;
+		try {
+			ctx.ui.setWorkingMessage(action === "stop" ? WORKING_STOP : action === "close" ? WORKING_CLOSE : undefined);
+		} catch {
+			// an older Pi
+		}
+		pi.events.emit("aside:esc", { action });
 	}
 
 	/** Redraw at the spinner's pace while an answer runs. */
@@ -779,6 +828,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		panel.hidden = true;
 		suggestion = undefined;
 		renderNow();
+		syncEsc();
 		refreshBelow();
 		return true;
 	}
@@ -824,6 +874,7 @@ export default function piAside(pi: ExtensionAPI): void {
 				panelMore = undefined;
 				panelLast = { lines: [] };
 				ctx.ui.setWidget(PANEL_WIDGET, undefined);
+				syncEsc();
 				return;
 			}
 			ctx.ui.setWidget(
@@ -844,6 +895,7 @@ export default function piAside(pi: ExtensionAPI): void {
 							panel.mouse = typeof tui?.scrollBy === "function";
 							const r = retractableNow();
 							panel.forwardable = !!r && r.thread === thread && panel.turns.at(-1) === r.turn;
+							panel.continueKey = busy() ? "?" : "/aside";
 							const view = panelView(panel, width, theme, md, Date.now());
 							panelLast = view;
 							panelMore = view.more;
@@ -860,7 +912,7 @@ export default function piAside(pi: ExtensionAPI): void {
 		}
 	}
 
-	function belowState(): { hint: HintKind; next: string | undefined } {
+	function belowState(): { hint: HintKind; next: string | undefined; agent?: boolean } {
 		const ctx = ctxRef;
 		if (!ctx || ctx.mode !== "tui") return { hint: undefined, next: undefined };
 		let text = "";
@@ -876,17 +928,20 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (text === "" && undoable()) hint = "undo";
 		if (text !== "") { suggestion = undefined; childHint = undefined; }
 		const next = text === "" ? suggestion : undefined;
-		return { hint, next };
+		// Stopped while the agent runs: Esc is still the aside's until the panel closes. Say so where the user looks.
+		const last = panel.turns.at(-1);
+		const agent = text === "" && running() && !panel.hidden && !panel.sentToAgent && !!last?.stopped && !last.retracted;
+		return { hint, next, agent };
 	}
 
-	let belowCache: { hint: HintKind; next: string | undefined } = { hint: undefined, next: undefined };
+	let belowCache: { hint: HintKind; next: string | undefined; agent?: boolean } = { hint: undefined, next: undefined };
 
 	function refreshBelow(): void {
 		const ctx = ctxRef;
 		if (!ctx || ctx.mode !== "tui") return;
 		const state = belowState();
 		belowCache = state;
-		const show = state.hint !== undefined || state.next !== undefined || childHint !== undefined;
+		const show = state.hint !== undefined || state.next !== undefined || !!state.agent || childHint !== undefined;
 		try {
 			if (show !== belowShown) {
 				belowShown = show;
@@ -952,15 +1007,26 @@ export default function piAside(pi: ExtensionAPI): void {
 		if (ctx.mode !== "tui") return;
 		unsubscribeInput = ctx.ui.onTerminalInput((data) => {
 			const kb = getKeybindings();
-			// Esc closes what is in front (docs/ux.md §3.2): the panel while it is on screen, then, as in Pi, the agent's
-			// run. A second Esc right after closing the panel is a double press, not a stop.
+			// Esc acts on what is in front (docs/ux.md §3.2): it stops the aside while it runs, then closes its panel,
+			// then, as in Pi, stops the agent. Each press does one thing: one right after another is a double press.
 			if (matchesKey(data, "escape") && editorFocused() && !autocompleteOpen()) {
-				if (panelOpen() && closePanel()) {
-					closedAt = Date.now();
+				const now = Date.now();
+				const repeat = now - escAt < ESC_GUARD_MS;
+				if (panelOpen()) {
+					// A double press right after a stop does not go on to close the panel: the stopped aside can continue.
+					if (repeat && escDid === "stop") escAt = now;
+					else if (asideRunning()) {
+						stopAside();
+						[escAt, escDid] = [now, "stop"];
+					} else {
+						closePanel();
+						[escAt, escDid] = [now, "close"];
+					}
 					return { consume: true };
 				}
-				if (Date.now() - closedAt < ESC_GUARD_MS) {
-					closedAt = Date.now();
+				// Nor does one right after the aside closed go on to stop the agent.
+				if (repeat) {
+					escAt = now;
 					return { consume: true };
 				}
 			}

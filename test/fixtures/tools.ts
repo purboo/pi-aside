@@ -13,6 +13,7 @@ export default function toolsFixture(pi: ExtensionAPI): void {
 	let controller: AbortController | undefined;
 	let releasePermission: (() => void) | undefined;
 	let releasePaid: (() => void) | undefined;
+	let releaseStubborn: (() => void) | undefined;
 	const schema = { type: "object", properties: { value: { type: "string" } }, required: ["value"] };
 	for (const [name, exposure] of [["aside_echo", "direct"], ["aside_deferred", "deferred"], ["aside_model_only", "model-only"]] as const) {
 		pi.registerTool({
@@ -44,6 +45,14 @@ export default function toolsFixture(pi: ExtensionAPI): void {
 				if (signal?.aborted) finish();
 			});
 			return { content: [{ type: "text", text: signal?.aborted ? "cancelled" : "finished" }], details: undefined };
+		},
+	});
+	pi.registerTool({
+		name: "aside_stubborn", label: "Stubborn", description: "Ignores cancellation", parameters: { type: "object", properties: {} },
+		async execute(_id, _args, _signal, _update, ctx) {
+			ctx.ui.notify("TOOL_STUBBORN", "info");
+			await new Promise<void>((resolve) => { releaseStubborn = resolve; setTimeout(resolve, 10_000); });
+			return { content: [{ type: "text", text: "stubborn finished" }], details: undefined };
 		},
 	});
 	const paidUsage = (units: number): Usage => ({
@@ -119,11 +128,17 @@ export default function toolsFixture(pi: ExtensionAPI): void {
 	});
 	pi.registerCommand("tool-release", {
 		description: "Release the pending permission hook",
-		handler: async () => { releasePermission?.(); releasePermission = undefined; releasePaid?.(); releasePaid = undefined; },
+		handler: async () => { releasePermission?.(); releasePermission = undefined; releasePaid?.(); releasePaid = undefined; releaseStubborn?.(); releaseStubborn = undefined; },
 	});
 	pi.registerCommand("tool-abort", {
 		description: "Abort the side operation",
 		handler: async () => { controller?.abort(); thread?.abort(); },
+	});
+	pi.registerCommand("tool-follow", {
+		description: "Ask a follow-up on the same thread",
+		handler: async (question, ctx) => {
+			void thread!.ask(question, { routeCheck: true }).then((result) => ctx.ui.notify(`THREAD_DONE ${JSON.stringify(result)}`, "info"));
+		},
 	});
 	pi.registerCommand("tool-aside", {
 		description: "Run a thread with routing",

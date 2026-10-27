@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.7.0
+
+- Esc stops the aside at once and leaves its panel open. A long command is killed with its process tree, and a
+  long thinking or answer is cut off. The panel keeps what was done: finished steps, the text so far, and where it
+  stopped, `■ $ bun run build --profile ··· stopped · 41s`. A follow-up continues after it: the aside knows what
+  ran, what the stopped command printed, and that you stopped it, and it reads the same cache. The next Esc
+  closes the panel, and only then does Esc stop the agent. An Esc within 500 ms of the one before does nothing.
+  Before, Esc closed the panel and discarded what the stopped aside had done. ✕ still stops and closes.
+- Where Esc goes is on screen. The panel's border is lit while the aside works and settles once it has stopped or
+  answered. Its bottom edge names the keys (`esc stop`, `? continue · esc close`, `esc close`). Pi's working line
+  says `Working · esc stops the aside first` while the panel is open. After a stop while the agent runs, a line
+  below the editor says `the agent is still running · esc closes the aside, then esc stops the agent`. Extensions
+  that draw their own interrupt hint can listen to `aside:esc` on `pi.events`.
+- Styling in Pi's theme colors. The live step reads in the text color, with its own time at the right edge.
+  Finished steps get a green ✓, and thinking uses Pi's thinking color.
+- After a stop, `↑↵ sends it to the agent instead` stays under an empty editor while the stopped message can
+  still go to the agent. An Esc right after the `?` rule took a message aside often meant "that was for the agent".
+
 ## 0.6.1
 
 - An aside right after a compaction reads the main cache again. The request observed before the compaction stays

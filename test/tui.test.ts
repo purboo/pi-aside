@@ -333,7 +333,7 @@ describe("TUI", () => {
 		tui.type("/aside why B?");
 		tui.key("Enter");
 		await tui.waitForScreen(/[\u2800-\u28ff] working/);
-		await tui.waitForScreen(/working · [1-9]s/);
+		await tui.waitForScreen(/working\s+[1-9]s/);
 		hold.resolve();
 		await tui.waitForScreen(/[\u2800-\u28ff] thinking/);
 		const thinking = await tui.waitForScreen(/Comparing the two approaches carefully\./);
@@ -367,28 +367,83 @@ describe("TUI", () => {
 		expect(server.requests.length).toBe(requests);
 		tui.type("/aside");
 		tui.key("Enter");
-		await tui.waitForScreen(/esc close/);
+		await tui.waitForScreen(/scroll · esc close/);
 		expect(tui.screen()).toMatch(/The side answer\./);
 		tui.key("Escape");
-		for (let i = 0; i < 50 && /esc close/.test(tui.screen()); i++) await sleep(100);
-		expect(tui.screen()).not.toMatch(/esc close/);
-		// An aside still running stops with its panel.
+		for (let i = 0; i < 50 && /scroll · esc close/.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/scroll · esc close/);
+		// An aside still running: Esc stops it and the panel stays, with how to go on; the next Esc closes it.
 		const hold = deferred();
 		server.enqueue({ text: "route: side\nNever shown.", hold: hold.promise, usage: { input: 10, cacheRead: 900 } });
 		tui.type("/aside is it slow?");
 		tui.key("Enter");
-		await tui.waitForScreen(/╭─ is it slow\?/);
+		await tui.waitForScreen(/esc stop\b/);
 		await server.waitForRequests(requests + 1);
+		tui.key("Escape");
+		const stopped = await tui.waitForScreen(/■ working\s+stopped/);
+		expect(stopped).toMatch(/╭─ is it slow\?/);
+		// The agent is idle, so a `?` message would go to it: `/aside` continues.
+		expect(stopped).toMatch(/\/aside continue · esc close/);
+		await sleep(600);
 		tui.key("Escape");
 		for (let i = 0; i < 50 && /is it slow\?/.test(tui.screen()); i++) await sleep(100);
 		expect(tui.screen()).not.toMatch(/is it slow\?/);
 		hold.resolve();
 		tui.type("/aside");
 		tui.key("Enter");
-		const reread = await tui.waitForScreen(/esc close/);
-		expect(reread).toMatch(/\(stopped\)/);
+		const reread = await tui.waitForScreen(/scroll · esc close/);
+		expect(reread).toMatch(/\(stopped while working\)/);
 		expect(reread).not.toMatch(/Never shown\./);
 		tui.key("Escape");
+	}, 60_000);
+
+	test("while the agent runs: Esc stops the aside, not the agent; `?` continues after the stopped step; then Esc closes, then stops the agent", async () => {
+		const { server, tui } = await start();
+		// The agent runs a long tool: its request is done, so the aside forks from it at once.
+		server.enqueue(
+			{ toolCalls: [{ name: "bash", arguments: { command: "sleep 20; echo main-step-finished" } }], usage: { input: 50, cacheWrite: 900 } },
+			{ text: "Main step done.", usage: { input: 50, cacheRead: 900 } },
+		);
+		tui.type("run the main step");
+		tui.key("Enter");
+		await tui.waitForScreen(/sleep 20/);
+		let side = 0;
+		server.respond((r) => JSON.stringify(r.body).includes("<aside>")
+			? ++side === 1
+				? { text: "route: side\nChecking the build.", toolCalls: [{ name: "bash", arguments: { command: "sleep 30; echo built" } }], usage: { input: 10, cacheRead: 900 } }
+				: { text: "route: side\nSkipped the build.", usage: { input: 10, cacheRead: 900 } }
+			: undefined);
+		tui.type("why is the build slow?");
+		tui.key("Enter");
+		const running = await tui.waitForScreen(/\$ sleep 30/);
+		expect(running).toMatch(/esc stop\b/);
+		await tui.waitForScreen(/esc stops the aside first/);
+		tui.key("Escape");
+		const stopped = await tui.waitForScreen(/■ \$ sleep 30; echo built/);
+		expect(stopped).toMatch(/stopped/);
+		expect(stopped).toMatch(/\? continue · esc close/);
+		await tui.waitForScreen(/the agent is still running · esc closes the aside, then esc stops the agent/);
+		await tui.waitForScreen(/esc closes the aside first/);
+		expect(tui.screen()).not.toMatch(/[Aa]bort/);
+		await sleep(600);
+		tui.type("skip the build, just check tsconfig?");
+		tui.key("Enter");
+		await tui.waitForScreen(/Skipped the build\./);
+		expect(tui.screen()).toMatch(/after: why is the build slow\?/);
+		const asides = server.requests.filter((r) => JSON.stringify(r.body).includes("<aside>"));
+		expect(asides).toHaveLength(2);
+		const follow = JSON.stringify(asides[1]!.body);
+		expect(follow).toContain("Stopped by the user after");
+		expect(follow).toContain("The user stopped your previous reply before it finished.");
+		await sleep(600);
+		tui.key("Escape");
+		for (let i = 0; i < 50 && /Skipped the build\./.test(tui.screen()); i++) await sleep(100);
+		expect(tui.screen()).not.toMatch(/Skipped the build\.|aside first/);
+		expect(tui.screen()).not.toMatch(/[Aa]bort/);
+		await sleep(600);
+		tui.key("Escape");
+		await tui.waitForScreen(/[Aa]bort/);
+		expect(tui.screen()).not.toMatch(/Main step done\./);
 	}, 60_000);
 
 	test("a long answer: ctrl+o where the panel prints it opens the reader; typing there goes on in the editor", async () => {
@@ -563,7 +618,7 @@ describe("TUI", () => {
 		await tui.waitForScreen(/END/);
 		tui.type("/aside");
 		tui.key("Enter");
-		const screen = await tui.waitForScreen(/esc close/);
+		const screen = await tui.waitForScreen(/scroll · esc close/);
 		expect(screen).toMatch(/\? second\?/);
 		expect(screen).toMatch(/END/);
 		expect(screen).not.toMatch(/\? first\?/);

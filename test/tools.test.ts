@@ -238,6 +238,81 @@ describe("thread tool boundaries", () => {
 	}, 20_000);
 });
 
+/** A request's messages without cache markers, which move to the newest message on every request. */
+function messagesOf(body: unknown): unknown[] {
+	const strip = (value: unknown): unknown =>
+		Array.isArray(value) ? value.map(strip)
+			: value && typeof value === "object" ? Object.fromEntries(Object.entries(value).filter(([k]) => k !== "cache_control").map(([k, v]) => [k, strip(v)]))
+				: value;
+	return strip((body as { messages: unknown[] }).messages) as unknown[];
+}
+
+describe("a stopped aside (0.7.0)", () => {
+	test("keeps what it did: the next question continues after it, over the same request prefix", async () => {
+		const p = await boot();
+		server!.enqueue(
+			{ text: "route: side\nChecking the cache first.", toolCalls: [
+				{ id: "w1", name: "write", arguments: { path: "cache.txt", content: "42" } },
+				{ id: "slow", name: "aside_slow", arguments: {} },
+				{ id: "w2", name: "write", arguments: { path: "never.txt", content: "no" } },
+			] },
+			{ text: "route: side\nSkipped the build." },
+		);
+		await p.prompt("/tool-aside why is the build slow");
+		await p.waitForNotify("TOOL_STARTED");
+		await p.prompt("/tool-abort");
+		const stopped = await threadDone();
+		expect(stopped.aborted).toBe(true);
+		expect(stopped.stopped).toMatchObject({ label: "aside_slow", tool: true });
+		expect(stopped.steps).toEqual([{ label: "write cache.txt", ok: true }]);
+		expect(existsSync(join(p.cwd, "never.txt"))).toBe(false);
+		expect(server!.requests.length).toBe(2);
+
+		await p.prompt("/tool-follow skip the build, just check tsconfig?");
+		const follow = await threadDone(1);
+		expect(follow.aborted).toBeUndefined();
+		expect(follow.raw).toContain("Skipped the build.");
+		const [first, next] = [server!.requests[1]!.body, server!.requests[2]!.body];
+		const text = JSON.stringify(next);
+		// The finished call's result, what the stopped one returned, and the call that never ran.
+		expect(text).toContain("Checking the cache first.");
+		expect(text).toMatch(/cancelled\\n\\nStopped by the user after \d+s, before it finished\./);
+		expect(text).toContain("Not run: the user stopped the aside.");
+		expect(text).toContain("(The user stopped your previous reply before it finished.)");
+		// The first request is a prefix of the next one: the follow-up reads what the stopped one cached.
+		const before = messagesOf(first);
+		expect(messagesOf(next).slice(0, before.length)).toEqual(before);
+	}, 25_000);
+
+	test("stops at once even when a tool ignores the stop; a reply cut off while streaming keeps its text", async () => {
+		const p = await boot();
+		server!.enqueue({ text: "route: side\n", toolCalls: [{ id: "stub", name: "aside_stubborn", arguments: {} }] });
+		await p.prompt("/tool-aside stubborn task");
+		await p.waitForNotify("TOOL_STUBBORN");
+		const at = Date.now();
+		await p.prompt("/tool-abort");
+		const stopped = await threadDone();
+		expect(Date.now() - at).toBeLessThan(4000);
+		expect(stopped.aborted).toBe(true);
+		await p.prompt("/tool-release");
+
+		server!.enqueue({ text: "route: side\nThe first half of the answer, and then", chunks: 2, delayMs: 3000 }, { text: "route: side\nGoing on." });
+		await p.prompt("/tool-follow and the other one?");
+		await server!.waitForRequests(3);
+		await new Promise((r) => setTimeout(r, 300));
+		await p.prompt("/tool-abort");
+		const cut = await threadDone(1);
+		expect(cut.stopped).toMatchObject({ label: "writing", tool: false });
+		await p.prompt("/tool-follow go on");
+		await threadDone(2);
+		const text = JSON.stringify(server!.requests[3]!.body);
+		// The stubborn call's result says it was stopped; the cut-off reply's text stays as an assistant message.
+		expect(text).toContain("Stopped by the user after");
+		expect(text).toContain('{"role":"assistant","content":[{"type":"text","text":"route: side\\nThe first hal"}]}');
+		expect(text).toContain("go on");
+	}, 25_000);
+});
+
 function reportedUsage(prefix: string): Array<{ tag?: string; toolName?: string; usage: import("@earendil-works/pi-ai").Usage; provider?: string; model?: string; note?: string }> {
 	return pi!.notifications().filter((n) => n.startsWith(prefix)).map((n) => JSON.parse(n.slice(prefix.length)));
 }

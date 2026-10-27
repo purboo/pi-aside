@@ -55,15 +55,16 @@ or from a checkout: `pi install /path/to/pi-aside`.
 | Tap or click ↪ beside ✕ | The same, in fullscreen. |
 | “Send that to the agent as it is” in the aside | Sends your previous message unchanged, as your own message. |
 | “Move this to its own window” in the aside | Opens a named Pi window beside the current tmux window, with the conversation and tools preserved. Outside tmux, copies or shows the resume command. |
-| Esc with the panel open | Closes the aside and cancels its work; the main agent keeps going. A second Esc within 500 ms is ignored. With no aside open, Esc keeps Pi's behavior. |
+| Esc while the aside works | Stops it at once; the main agent keeps going. The panel stays with what the aside did and where it stopped: finished steps, the text so far, and `■ $ bun run build · stopped · 41s`. A follow-up (`?` while the agent runs, `/aside` otherwise) continues after it, and still reads its cache. The panel's bottom edge says what Esc does now (`esc stop`, `esc close`), and so does Pi's working line (`Working · esc stops the aside first`). |
+| Esc once it has stopped or answered | Closes the panel. Then Esc is Pi's again and stops the agent. An Esc within 500 ms of the one before does nothing, so a double press never goes further than one step. |
 | Swipe or wheel over the panel | Scrolls the aside. Outside it, Pi's scrolling. Requires fullscreen mode and a terminal that reports mouse events. |
 | Tap or click ✕ | Closes the panel or reader (fullscreen). |
 | Tap or click a “more lines” count | Opens the reader (fullscreen). |
 
 An aside can also do an independent task: `/aside check disk usage` or `/aside write this feedback to notes/tool.md`.
 It uses the session's callable tools through Pi's validation and permission hooks, with no extra approval flow.
-Finished shell, edit and write calls leave concise steps in the panel. Tools share the workspace; closing the
-aside cancels further work but does not undo completed changes. Pi's `model-only` tools cannot run through its
+Finished shell, edit and write calls leave concise steps in the panel. Tools share the workspace; stopping the
+aside kills the running command and skips the rest, but does not undo completed changes. Pi's `model-only` tools cannot run through its
 nested-tool API. This API also requires an existing main assistant response: immediately after starting a blank
 session, let the main agent answer once before asking an aside to run tools.
 
