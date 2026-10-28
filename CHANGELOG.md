@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.2
+
+- Fixed an extension-load failure introduced in 0.7.1: `Cannot find module
+  '@earendil-works/pi-ai/api/simple-options'`. Pi exposes selected modules to installed extensions, so a
+  source checkout with local dependencies could pass while the npm package failed to load. The output-limit
+  calculation now uses only the extension-visible root API, with parity checks against Pi's calculation.
+- Added an npm tarball regression: unpack outside the checkout without `node_modules`, load through Pi's native
+  extension loader and bundled CLI, then verify an exact aside request with a context-adjusted output limit.
+
 ## 0.7.1
 
 - Aside model requests now use Pi's agent-level retry settings and exponential backoff for transient provider and

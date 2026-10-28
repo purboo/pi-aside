@@ -281,6 +281,8 @@ C2/C3 only, `withContextBudget` compares against B0/P with that field set to Pi'
 only if B1 actually has that value. Responses retains its provider minimum of 16 tokens. A fixed sampling override
 that keeps the original ceiling is compared unchanged. Unexpected limits still fail; C1 still rejects handler
 changes to token limits, and every other field, including thinking budgets, stays under the original checks.
+The installed extension uses a local `contextOutputLimit` calculation matching Pi 1.4, with parity tests against
+Pi's helper: Pi's extension loader does not expose the `api/simple-options` subpath at runtime.
 
 The concurrent case is common. The aside is asked while the main reply streams, so G has no completed reply. On a
 native-effort model this gives `B0 = …, user, E` and `B1 = …, user ⊕ question, E`. With E split off, the core

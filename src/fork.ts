@@ -3,8 +3,8 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { normalizeContext } from "@earendil-works/pi-ai";
-import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
+import { contextOutputLimit } from "./output-budget.ts";
 import type { Observation, Recipe } from "./observe.ts";
 import {
 	applyDelta,
@@ -439,7 +439,7 @@ async function demote(
 function withContextBudget(api: string, payload: Payload, generated: Payload, model: Any, context: Any): Payload {
 	const field = api === "openai-responses" ? "max_output_tokens" : api === "openai-completions" && "max_completion_tokens" in payload ? "max_completion_tokens" : "max_tokens";
 	if (typeof payload[field] !== "number") return payload;
-	const limit = clampMaxTokensToContext(model, context, model.maxTokens);
+	const limit = contextOutputLimit(model, context);
 	const expected = api === "openai-responses" ? Math.max(16, limit) : limit;
 	// A fixed sampling-parameter override may keep the old cap: compare that unchanged, as before.
 	return generated[field] === expected ? { ...payload, [field]: expected } : payload;

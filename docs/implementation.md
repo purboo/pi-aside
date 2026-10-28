@@ -327,9 +327,27 @@ sent payload. Fixed sampling overrides and unexpected limits keep the original s
 budgets and every other field are still checked. C1 is unchanged. Offline RPC regressions cover increasing and
 decreasing caps, tool rounds and follow-ups on Anthropic, Responses and Completions.
 
+### 2.18 Installed-package loading (0.7.2)
+
+0.7.1 imported `@earendil-works/pi-ai/api/simple-options` at runtime. The bundled CLI could resolve this from a
+checkout's `node_modules`, hiding a failure in installed packages. Pi's native loader aliases the pi-ai root to
+its compatibility entry; the unlisted subpath is either rewritten under that entry or unavailable outside the
+checkout. `output-budget.ts` now mirrors Pi 1.4's calculation using only root exports. Twelve parity cases check
+its text/image estimates, system sections and tool changes, measured usage, failed/empty usage and timestamp
+invalidation against Pi's helper across five model limits. The helper subpath is imported only by tests.
+
+`packaging.test.ts` creates the actual npm tarball and extracts it outside the checkout with no `node_modules`.
+It checks Pi's native extension loader first, then starts the bundled RPC CLI with the extracted package and
+asserts an exact answer with an adjusted output limit. The native check reproduced the 0.7.1 load error before
+the fix and passes afterward.
+
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, 232 tests)
+### 3.1 Offline (245 tests)
+
+0.7.2 check: TypeScript passed; **245 tests passed, 0 failed, 1,274 assertions**, across 13 files. Locally the
+suite ran in two parallel batches: 25 terminal tests and 220 other tests. Release CI runs `bun test` over the
+whole suite.
 
 0.7.1 retry/output-budget check: TypeScript passed; **232 tests passed, 0 failed, 1,203 assertions**, across
 11 files in 79.10 s. This uses a local provider capture server; it does not claim a live provider cache hit.
