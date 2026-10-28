@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.1
+
+- Aside model requests now use Pi's agent-level retry settings and exponential backoff for transient provider and
+  network errors, including `concurrency too high` and `gateway_concurrency_limit`. The panel shows a retry
+  countdown; Esc cancels the wait immediately. Completed tools run once, failed partial replies stay out of
+  subsequent requests, and paid usage from failed attempts is still counted.
+- Pi's context-based output limit changes (`max_output_tokens`, `max_tokens`, `max_completion_tokens`) no longer
+  make an otherwise exact aside rebuild its context. The checks accept Pi's computed limit for the current
+  request while continuing to check the conversation, thinking configuration and other request fields.
+
 ## 0.7.0
 
 - Esc stops the aside at once and leaves its panel open. A long command is killed with its process tree, and a

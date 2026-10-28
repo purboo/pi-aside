@@ -302,9 +302,37 @@ rebuilt the context and wrote 128,133 and 38,223 tokens. The main session's next
 request boundary, read only the 25,139-token system and tool prefix of either. The panel's `$0.000` came from that
 machine's models.json, which has no prices for its provider.
 
+### 2.16 Agent-level retries
+
+`AsideThread.ask` applies Pi's `getRetrySettings`, `isRetryableAssistantError`, `isContextOverflow` and
+`retryDelayMs` around each model request. Concurrency-limit wording is normalized to throttling before Pi's
+classifier runs, retaining the quota/billing exclusions. Provider retries remain configured separately. Each tool
+round gets a new retry budget; retries reuse its messages and results without rerunning tools or counting toward
+the tool-round limit. Failed attempts are accounted once but excluded from exchange/promotion history. Their
+partial text and first-text timestamp are restored to the state before the request.
+
+`TurnView.retry` drives a countdown even when earlier tool rounds already produced visible text. An abortable
+`node:timers/promises` delay releases on Esc or session cancellation; stopping says `waiting to retry` rather than
+recording a tool step. Tests cover exact requests through all three real Pi provider adapters, rebuilt threads,
+the literal gateway error, exhausted/disabled budgets, bounded backoff, quota/auth/context failures, partial
+usage, tools and cancellation.
+
+### 2.17 Context-based output limits
+
+Pi 1.4 clamps each request's output ceiling to the remaining context estimate. After G/Q or a tool round changes
+that estimate, C2 used to reject an otherwise identical fork with `the fork changed max_output_tokens` (or the
+other adapters' token-limit fields). `withContextBudget` accepts the current cap only when it equals Pi's own
+`clampMaxTokensToContext` result, including the Responses minimum. It adjusts the comparison references, not the
+sent payload. Fixed sampling overrides and unexpected limits keep the original strict comparison; thinking
+budgets and every other field are still checked. C1 is unchanged. Offline RPC regressions cover increasing and
+decreasing caps, tool rounds and follow-ups on Anthropic, Responses and Completions.
+
 ## 3. Verification
 
-### 3.1 Offline (`bun run check`, 205 tests)
+### 3.1 Offline (`bun run check`, 232 tests)
+
+0.7.1 retry/output-budget check: TypeScript passed; **232 tests passed, 0 failed, 1,203 assertions**, across
+11 files in 79.10 s. This uses a local provider capture server; it does not claim a live provider cache hit.
 
 Final 0.7.0 check: TypeScript passed; **205 tests passed, 0 failed, 981 assertions**, across 9 files in 76.29 s.
 (0.6.1: 199 tests, 921 assertions, 9 files.)

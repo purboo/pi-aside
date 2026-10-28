@@ -1,6 +1,8 @@
 // A side thread (docs/design.md §4.4, §4.5; docs/ux.md §3.2, §3.9): questions, answers and side tasks over one fork,
 // with the session's callable tools, follow-ups that fork again when the main session has moved, and accounting.
 
+import { setTimeout as delay } from "node:timers/promises";
+import { type AssistantMessage, isContextOverflow, isRetryableAssistantError, retryDelayMs } from "@earendil-works/pi-ai";
 import { type Fork, type ForkEnv, gainedSince, makeFork, type SendResult, send, type Tier } from "./fork.ts";
 import type { Observer } from "./observe.ts";
 import { hasRouteLine, parseReply, type ParsedReply } from "./reply.ts";
@@ -56,6 +58,8 @@ export interface TurnView {
 	/** The live activity line, such as `reading src/a.ts` or `$ du -sh ~`, and since when. */
 	activity?: string;
 	activitySince?: number;
+	/** Agent-level backoff, using Pi's retry settings; no tool is running during this wait. */
+	retry?: { attempt: number; maxAttempts: number; delayMs: number; startedAt: number };
 	/**
 	 * Set the moment the user (or anything else) stopped the turn while it ran: what it was doing (a tool's activity,
 	 * `thinking`, `writing`, `working`), when, and for how long that had run. The turn keeps what it did.
@@ -181,6 +185,14 @@ function contextEntryCount(sessionManager: Any): number {
 	return branch.filter((e) => e.type === "message" || e.type === "custom_message" || e.type === "branch_summary").length;
 }
 
+/** Pi's transient-error policy, including gateways that report throttling as "concurrency too high". */
+function retryable(message: AssistantMessage, contextWindow: number): boolean {
+	if (isContextOverflow(message, contextWindow)) return false;
+	// Normalize only the throttle wording, preserving quota/billing text so Pi's exclusions still apply.
+	const errorMessage = message.errorMessage?.replace(/(?:\b|_)concurrency[ _-]+(?:too[ _-]+high|limit(?:[ _-]+exceeded)?)\b/gi, "too many requests");
+	return isRetryableAssistantError({ ...message, errorMessage });
+}
+
 export class AsideThread {
 	fork: Fork | undefined;
 	/** Q1, A1 (with tool rounds), Q2, … over the fork's base. */
@@ -234,8 +246,9 @@ export class AsideThread {
 		if (this.controller && turn && !turn.done && !turn.stopped) {
 			const at = Date.now();
 			const tool = !!turn.activity;
-			const label = turn.activity ?? (parseReply(turn.raw, false).body ? "writing" : turn.thinking?.trim() ? "thinking" : "working");
-			turn.stopped = { label, at, ms: at - (tool ? (turn.activitySince ?? turn.startedAt) : turn.startedAt), tool };
+			const label = turn.activity ?? (turn.retry ? "waiting to retry" : parseReply(turn.raw, false).body ? "writing" : turn.thinking?.trim() ? "thinking" : "working");
+			const since = tool ? (turn.activitySince ?? turn.startedAt) : (turn.retry?.startedAt ?? turn.startedAt);
+			turn.stopped = { label, at, ms: at - since, tool };
 		}
 		this.controller?.abort();
 	}
@@ -328,21 +341,46 @@ export class AsideThread {
 			let textBefore = "";
 			for (let round = 0; ; round++) {
 				signal.throwIfAborted();
-				const result: SendResult = await send(this.host.env, fork, [...this.exchange, ...added!], signal, (event: Any) => {
-					if (!signal.aborted && event?.partial) {
-						turn.raw = textBefore + textOf(event.partial);
-						turn.thinking = thinkingOf(event.partial) || undefined;
-						if (turn.firstTextAt === undefined && turn.raw.trim() !== "") turn.firstTextAt = Date.now();
-						reportRoute();
-						update();
+				let result: SendResult;
+				const firstTextAt = turn.firstTextAt;
+				const routeBefore: boolean = routeReported;
+				// Retry only this model request: completed tool calls and their results stay in `added`.
+				for (let attempt = 0; ; attempt++) {
+					signal.throwIfAborted();
+					result = await send(this.host.env, fork, [...this.exchange, ...added!], signal, (event: Any) => {
+						if (!signal.aborted && event?.partial) {
+							turn.raw = textBefore + textOf(event.partial);
+							turn.thinking = thinkingOf(event.partial) || undefined;
+							if (turn.firstTextAt === undefined && turn.raw.trim() !== "") turn.firstTextAt = Date.now();
+							reportRoute();
+							update();
+						}
+					});
+					turn.tier = result.tier;
+					turn.reason = result.reason ?? turn.reason;
+					turn.effort = fork.effort;
+					turn.thinking = undefined;
+					// A failed stream may already have incurred usage; count every attempt exactly once.
+					this.account(fork, result, turn);
+					if (signal.aborted) break;
+					const settings = this.host.env.settings().getRetrySettings();
+					const model = this.host.env.registry.find(fork.recipe.provider, fork.recipe.modelId) ?? this.host.env.selectedModel();
+					if (!settings.enabled || attempt >= settings.maxRetries || !retryable(result.message, model?.contextWindow ?? 0)) break;
+					const delayMs = retryDelayMs(settings, attempt + 1);
+					// The failed attempt never enters model context or promotion history; replace its partial text too.
+					turn.raw = textBefore;
+					turn.firstTextAt = firstTextAt;
+					routeReported = routeBefore;
+					turn.retry = { attempt: attempt + 1, maxAttempts: settings.maxRetries, delayMs, startedAt: Date.now() };
+					update();
+					try {
+						await delay(delayMs, undefined, { signal });
+					} finally {
+						turn.retry = undefined;
 					}
-				});
+					update();
+				}
 				const message = result.message;
-				turn.tier = result.tier;
-				turn.reason = result.reason ?? turn.reason;
-				turn.effort = fork.effort;
-				turn.thinking = undefined;
-				this.account(fork, result, turn);
 				added.push(message);
 				this.history.push(message);
 				turn.raw = textBefore + textOf(message);
@@ -431,6 +469,7 @@ export class AsideThread {
 			turn.done = true;
 			turn.endedAt = Date.now();
 			turn.activity = undefined;
+			turn.retry = undefined;
 			turn.thinking = undefined;
 			if (this.controller === controller) {
 				this.controller = undefined;

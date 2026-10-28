@@ -19,7 +19,7 @@ export const PROVIDERS = {
 
 export type ApiName = keyof typeof PROVIDERS;
 
-export function modelsJson(baseUrl: string): unknown {
+export function modelsJson(baseUrl: string, limits?: { contextWindow: number; maxTokens: number }): unknown {
 	const model = (id: string, reasoning: boolean, compat?: Record<string, unknown>) => ({
 		id,
 		name: id,
@@ -27,6 +27,7 @@ export function modelsJson(baseUrl: string): unknown {
 		input: ["text", "image"],
 		contextWindow: 200000,
 		maxTokens: 16000,
+		...limits,
 		cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 		compat: { supportsMidConvoSystemMessages: true, ...(id.startsWith("claude") ? { supportsMidConvoToolChanges: true } : id.startsWith("gpt") ? { supportsAdditionalTools: true } : { supportsMidConvoToolAdditions: true }), ...compat },
 	});
@@ -62,6 +63,7 @@ export interface PiOptions {
 	thinking?: string;
 	extensions?: string[];
 	settings?: Record<string, unknown>;
+	modelLimits?: { contextWindow: number; maxTokens: number };
 	env?: Record<string, string>;
 	cwd?: string;
 	args?: string[];
@@ -218,7 +220,7 @@ export async function startPi(options: PiOptions): Promise<PiRpc> {
 	const sessionDir = mkdtempSync(join(tmpdir(), "pi-aside-sessions-"));
 	const cwd = options.cwd ?? mkdtempSync(join(tmpdir(), "pi-aside-cwd-"));
 	mkdirSync(cwd, { recursive: true });
-	writeFileSync(join(agentDir, "models.json"), JSON.stringify(modelsJson(options.baseUrl), null, 2));
+	writeFileSync(join(agentDir, "models.json"), JSON.stringify(modelsJson(options.baseUrl, options.modelLimits), null, 2));
 	writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "off", ...options.settings }, null, 2));
 	const api = PROVIDERS[options.api ?? "anthropic"];
 	const cli = join(piPackageDir(), "dist/bundle/cli.js");

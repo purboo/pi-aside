@@ -3,6 +3,7 @@
 
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { normalizeContext } from "@earendil-works/pi-ai";
+import { clampMaxTokensToContext } from "@earendil-works/pi-ai/api/simple-options";
 import { convertToLlm, sessionEntryToContextMessages } from "@earendil-works/pi-coding-agent";
 import type { Observation, Recipe } from "./observe.ts";
 import {
@@ -431,6 +432,19 @@ async function demote(
 	return sendRebuilt(env, fork, messages, signal, onEvent);
 }
 
+/**
+ * Pi adjusts the output ceiling as context estimates change. It is outside the cached prompt; accept only the
+ * ceiling computed by Pi for this request, leaving every other field (including thinking budgets) under C2/C3.
+ */
+function withContextBudget(api: string, payload: Payload, generated: Payload, model: Any, context: Any): Payload {
+	const field = api === "openai-responses" ? "max_output_tokens" : api === "openai-completions" && "max_completion_tokens" in payload ? "max_completion_tokens" : "max_tokens";
+	if (typeof payload[field] !== "number") return payload;
+	const limit = clampMaxTokensToContext(model, context, model.maxTokens);
+	const expected = api === "openai-responses" ? Math.max(16, limit) : limit;
+	// A fixed sampling-parameter override may keep the old cap: compare that unchanged, as before.
+	return generated[field] === expected ? { ...payload, [field]: expected } : payload;
+}
+
 async function sendExact(
 	env: ForkEnv,
 	fork: Fork,
@@ -472,13 +486,15 @@ async function sendExact(
 			restart = true;
 			throw new Fallback("restart");
 		}
-		const c2 = checkC2(recipe.api, fork.b0e ?? fork.b0!, b1 as Payload, p);
+		const expectedBase = withContextBudget(recipe.api, fork.b0e ?? fork.b0!, b1 as Payload, clone, context);
+		const expectedObserved = withContextBudget(recipe.api, p, b1 as Payload, clone, context);
+		const c2 = checkC2(recipe.api, expectedBase, b1 as Payload, p);
 		if (!c2.ok) {
 			fallback = c2.reason;
 			throw new Fallback(c2.reason);
 		}
 		const f = applyDelta(b1 as Payload, fork.delta!);
-		const c3 = checkC3(recipe.api, f, p, fork.b0e ? splitList(recipe.api, fork.b0e)?.config : undefined);
+		const c3 = checkC3(recipe.api, f, expectedObserved, fork.b0e ? splitList(recipe.api, fork.b0e)?.config : undefined);
 		if (!c3.ok) {
 			fallback = c3.reason;
 			throw new Fallback(c3.reason);

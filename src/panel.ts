@@ -158,6 +158,11 @@ function thinkingTail(text: string): string {
 export function progressLines(turn: TurnView, width: number, theme: Theme, md: MarkdownRenderer, now: number): string[] {
 	const spin = theme.fg("accent", spinnerFrame(now));
 	const dim = (s: string) => theme.fg("dim", s);
+	if (turn.retry) {
+		const { attempt, maxAttempts, delayMs, startedAt } = turn.retry;
+		const left = Math.max(0, Math.ceil((delayMs - (now - startedAt)) / 1000));
+		return [truncateToWidth(`${spin} ${theme.fg("warning", `retrying ${attempt}/${maxAttempts} in ${left}s`)}`, width, "…")];
+	}
 	// The live step reads in the text color, with its own time on the right.
 	if (turn.activity) return [spread(`${spin} ${theme.fg("text", turn.activity)}`, dim(seconds(now - (turn.activitySince ?? turn.startedAt))), width)];
 	const time = dim(seconds(now - turn.startedAt));
@@ -247,7 +252,7 @@ export function panelBodyView(state: PanelState, width: number, theme: Theme, md
 		tail.push(stoppedLine(turn.stopped, width, theme));
 		if (turn.error) tail.push(theme.fg("error", truncateToWidth(`aside failed: ${turn.error.replace(/\s+/g, " ").trim()}`, width, "…")));
 	} else if (!turn.done) {
-		if (turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
+		if (turn.retry || turn.activity || !parsed.body) tail.push(...progressLines(turn, width, theme, md, now));
 	} else {
 		if (turn.aborted) tail.push(dim("stopped"));
 		if (turn.error) tail.push(theme.fg("error", truncateToWidth(`aside failed: ${turn.error.replace(/\s+/g, " ").trim()}`, width, "…")));
@@ -313,7 +318,7 @@ export function panelView(state: PanelState, width: number, theme: Theme, md: Ma
 	const border = (s: string) => theme.fg(tone, s);
 	const inner = Math.max(10, width - 4);
 	// The spinner sits in the title while the answer streams, and on the progress line before it (never both).
-	const progress = !!turn.activity || parseReply(turn.raw, turn.done).body === "";
+	const progress = !!turn.retry || !!turn.activity || parseReply(turn.raw, turn.done).body === "";
 	const spin = running && !progress ? `${spinnerFrame(now)} ` : "";
 	// The close mark sits at column width - 4: "╭─" title fill " ✕ " "─╮". The forward mark, at width - 9, keeps two
 	// cells of edge between them, so that a tap meant for one does not land on the other.

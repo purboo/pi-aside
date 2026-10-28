@@ -68,6 +68,11 @@ aside kills the running command and skips the rest, but does not undo completed 
 nested-tool API. This API also requires an existing main assistant response: immediately after starting a blank
 session, let the main agent answer once before asking an aside to run tools.
 
+Transient provider and network failures, including concurrency limits, retry using Pi's `retry` settings. The
+panel shows the attempt and a countdown; Esc stops the wait immediately. Retries repeat only the failed model
+request, keeping completed tool results. Invalid requests, authentication errors and exhausted quotas still fail
+immediately.
+
 A question mark does not always make a message a question: `can you also add tests?` may concern the main agent's
 current task. The aside model starts its reply with a hidden route line. Independent tasks stay on the side;
 when the message is about changing the main agent's current work, pi-aside sends your
@@ -107,8 +112,10 @@ the first request's cache counts, then the totals when tool rounds made more req
 - The aside uses the session's callable tools, up to 24 rounds per question, then one summary request.
   `/aside continue` starts fresh rounds. Its internal relay and move tools remain available even without main tools.
   Disabled session tools stay disabled; Pi's existing overrides, argument validation and tool hooks apply.
+- Pi may adjust the output limit as the context estimate changes. This keeps an exact fork when the limit matches
+  Pi's calculation for that request; the conversation and other request fields still pass the cache checks.
 - Each aside request adds one usage entry to the session file once the agent is idle, so `/session` costs stay
-  complete.
+  complete, including any usage incurred by failed retry attempts.
 
 Design: [docs/design.md](docs/design.md) (engine) and [docs/ux.md](docs/ux.md) (interaction).
 Implementation notes, deviations and verification: [docs/implementation.md](docs/implementation.md).
